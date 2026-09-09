@@ -35,7 +35,7 @@ export function AppShell() {
         <p className="page-eyebrow">Session security</p>
         <h1>Workspace access changed</h1>
         <p>
-          Your membership is no longer active. Boardivo removed workspace data
+          Your membership is no longer active. CedarDesk removed workspace data
           from the active view.
         </p>
         <button
@@ -57,7 +57,7 @@ export function AppShell() {
         <p className="page-eyebrow">Session security</p>
         <h1>Permissions could not be verified</h1>
         <p>
-          Boardivo removed workspace data from this view until your access can
+          CedarDesk removed workspace data from this view until your access can
           be confirmed.
         </p>
         <button
@@ -80,11 +80,11 @@ export function AppShell() {
       </a>
 
       <aside className="app-sidebar">
-        <Link className="app-brand" to="/" aria-label="Boardivo dashboard">
+        <Link className="app-brand" to="/" aria-label="CedarDesk dashboard">
           <span className="app-brand__mark" aria-hidden="true">
-            BI
+            CD
           </span>
-          <span>Boardivo</span>
+          <span>CedarDesk</span>
         </Link>
 
         <PrimaryNavigation />
@@ -111,7 +111,7 @@ export function AppShell() {
         <header className="app-topbar">
           <div>
             <p className="app-topbar__label">See every next step</p>
-            <p className="app-topbar__name">Boardivo Workspace</p>
+            <p className="app-topbar__name">CedarDesk Workspace</p>
           </div>
           <GlobalSearch />
           <NotificationCenter />

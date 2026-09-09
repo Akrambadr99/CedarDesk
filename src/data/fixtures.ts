@@ -19,7 +19,7 @@ export function createAtlasFixtures(
 
   const workspace = {
     id: ids.workspace('operations'),
-    name: 'Boardivo Workspace',
+    name: 'CedarDesk Workspace',
     slug: 'atlas-operations',
     createdAt,
   }
