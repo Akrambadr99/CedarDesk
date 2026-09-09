@@ -1,6 +1,6 @@
-# Taskora
+# Boardivo
 
-Taskora is a private operations and project-management application for
+Boardivo is a private operations and project-management application for
 projects, issues, workflow governance, collaboration, and operational analytics.
 It is a single React application built with strict TypeScript, Vite, Node.js 20,
 and npm.
