@@ -131,3 +131,21 @@ test('machine changeover rejection and quality release govern production', async
     await page.getByRole('button', { name: 'Release production', exact: true }).click();await save();
     await expect(page.locator('.detail-title')).toContainText('running');
 });
+
+test('factory execution reserves material, records consumption and verifies genealogy', async ({ page }) => {
+  await page.goto('/factory-execution');
+  await expect(page.getByRole('heading', { name: 'Shift, material and genealogy control' })).toBeVisible();
+  const role = page.getByRole('combobox', { name: 'Execution role' });
+  await page.getByRole('button', { name: 'Reserve for work order' }).click();
+  await expect(page.getByRole('status')).toContainText('Material reserved');
+  await expect(page.getByText('Lot balance: 800 kg')).toBeVisible();
+  await role.selectOption('Operator');
+  await page.getByRole('button', { name: 'Accept staged material' }).click();
+  await page.getByRole('button', { name: 'Record consumption' }).click();
+  await role.selectOption('Quality Engineer');
+  await page.getByRole('button', { name: 'Verify output genealogy' }).click();
+  await expect(page.getByRole('status')).toContainText('Lot genealogy verified');
+  await page.reload();
+  await expect(page.getByRole('listitem').filter({ hasText: 'lot-1 → FG-2026-001' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Factory execution history' })).toContainText('genealogy-recorded');
+});
