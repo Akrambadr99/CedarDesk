@@ -48,3 +48,9 @@ Expanded strong count: **27**.
 ## Strongest 15 candidates
 
 Directions **1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 15, 31, 33, 35, and 37** are the final shortlist. Their React judgment is respectively: evaluation ownership; cross-record readiness derivation; stale-response rejection; optimistic rollback; partial lot-release planning; permission invalidation during an action; conflict-safe allocation recovery; immutable recurrence editing; machine-keyed drafts; asynchronous save ownership; cross-tab merge boundaries; multi-entity release derivation; staged-release invalidation; late quality-state revocation; and synchronized maintenance/readiness views.
+
+## Quality disposition directions 41–50
+
+41. **Strong candidate · Medium-Hard:** release disposition combines immutable counts and every quality result. 42. **Strong candidate · Medium:** switching disposition preserves the selected order while changing evidence rules. 43. **Strong candidate · Medium-Hard:** a late failed inspection revokes release and enables rework. 44. **Strong candidate · Medium:** scrap disposition requires recorded scrap units. 45. **Strong candidate · Medium-Hard:** refreshed production counts revoke or restore release readiness. 46. **Strong candidate · Medium:** unrelated inspections cannot satisfy an order. 47. **Strong candidate · Medium-Hard:** order navigation prevents disposition evidence leakage. 48. **Strong candidate · Medium:** zero-target data stays deterministic. 49. **Too Easy:** rename Rework. 50. **Too Hard:** synchronize dispositions with a live MES.
+
+Current strong count: **35**. Revised strongest 15: **1, 2, 3, 4, 6, 8, 9, 12, 15, 31, 33, 35, 37, 41, and 43**.
