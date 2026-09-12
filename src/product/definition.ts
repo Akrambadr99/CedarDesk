@@ -70,6 +70,7 @@ const operations: Operation[] = [
 ];
 const seed = [entity('lot-1', 'lot', 'Aluminium coil A', 'released', { material: 'AL-6061', quantity: 1000 }), entity('machine-1', 'machine', 'Press 04', 'ready', { capacity: 500, line: 'North assembly' }), entity('order-1', 'order', 'Pump housing batch', 'queued', { lot: 'lot-1', machine: 'machine-1', target: 100, materialPerUnit: 2, due: '2026-10-15' })];
 const qualityClear = (entities: Entity[], orderId: string) => linked(entities, 'inspection', 'order', orderId).every(inspection => inspection.status !== 'failed' || rows(entities, 'disposition').some(item => item.fields['inspection'] === inspection.id && item.status === 'released')) && linked(entities, 'disposition', 'order', orderId).every(item => item.status === 'released');
+const scrapClear = (entities: Entity[], orderId: string) => linked(entities, 'scrapreview', 'order', orderId).every(item => item.status === 'released');
 kinds.push(kind('disposition', 'Quality dispositions', ['planned', 'performed', 'released'], [], [ref('order', 'Affected work order', 'order'), ref('inspection', 'Failed inspection', 'inspection'), txt('plan', 'Rework instructions'), txt('evidence', 'Execution evidence'), { ...ref('verification', 'Verification inspection', 'inspection'), required: false }]));
 operations.push(
     { key: 'plan-rework', label: 'Plan quality rework', kind: 'inspection', from: ['failed'], roles: [roles[2]!], fields: [txt('plan', 'Rework instructions')], run: ({ state, entity, input, add }) => {
@@ -110,6 +111,31 @@ operations.push(
     } },
 );
 
+kinds.push(kind('scrapreview', 'Scrap dispositions', ['pending', 'released'], [], [ref('order', 'Affected work order', 'order'), ref('count', 'Production event', 'count'), num('quantity', 'Scrapped units'), choice('category', 'Scrap category', ['material', 'setup', 'quality']), txt('rationale', 'Disposition rationale'), txt('openedBy', 'Recorded by'), {...txt('releasedBy', 'Released by'), required: false}]));
+operations.push(
+    {key: 'classify-scrap', label: 'Classify recorded scrap', kind: 'count', from: ['recorded'], roles: [roles[2]!], fields: [choice('category', 'Scrap category', ['material', 'setup', 'quality']), txt('rationale', 'Disposition rationale')], run: ({state, entity, input, actor, add}) => {
+        const quantity = number(entity.fields, 'scrap');
+        requireThat(quantity > 0, 'Only production events with scrapped units require disposition.');
+        requireThat(!rows(state.entities, 'scrapreview').some(item => item.fields['count'] === entity.id), 'This scrap event already has a disposition.');
+        requireThat(text(input, 'rationale').trim().length >= 12, 'Provide a specific scrap disposition rationale.');
+        const order = find(state.entities, text(entity.fields, 'order'), 'order');
+        requireThat(['running', 'held'].includes(order.status), 'Only active production can classify scrap.');
+        add('scrapreview', 'Scrap disposition · ' + order.title, {order: order.id, count: entity.id, quantity, category: text(input, 'category'), rationale: text(input, 'rationale').trim(), openedBy: actor.id, releasedBy: ''});
+        order.status = 'held';
+        return 'Scrap classified; production held for supervisor release.';
+    }},
+    {key: 'release-scrap', label: 'Release scrap disposition', kind: 'scrapreview', from: ['pending'], roles: [roles[0]!], run: ({state, entity, actor}) => {
+        const order = find(state.entities, text(entity.fields, 'order'), 'order');
+        requireThat(order.status === 'held', 'The affected production order is no longer held.');
+        requireThat(find(state.entities, text(order.fields, 'machine'), 'machine').status === 'ready', 'Resolve machine maintenance before release.');
+        requireThat(!linked(state.entities, 'downtime', 'order', order.id).some(item => item.status === 'open'), 'Resolve production downtime before release.');
+        requireThat(qualityClear(state.entities, order.id), 'Resolve quality holds before release.');
+        entity.status = 'released'; entity.fields['releasedBy'] = actor.id;
+        if (scrapClear(state.entities, order.id)) order.status = 'running';
+        return 'Scrap disposition released; recorded counts remain immutable and production resumed.';
+    }},
+);
+
 kinds.push(kind('downtime', 'Production downtime', ['open', 'resumed'], [], [ref('order', 'Work order', 'order'), txt('reason', 'Stop reason'), txt('startedBy', 'Stopped by'), txt('startedAt', 'Stopped at'), {...txt('resumedAt', 'Resumed at'), required: false}]));
 operations.push(
     {key: 'pause-production', label: 'Pause production', kind: 'order', from: ['running'], roles: [roles[0]!, roles[1]!], fields: [txt('reason', 'Stop reason')], run: ({state, entity, input, actor, now, add}) => {
@@ -133,6 +159,9 @@ const validate: Product['validate'] = entities => {
     for (const order of rows(entities, 'order')) {
         const counts = linked(entities, 'count', 'order', order.id);
         requireThat(total(counts, 'good') + total(counts, 'scrap') <= number(order.fields, 'target'), 'Production counts exceed target.');
+        const reviewed = linked(entities, 'scrapreview', 'order', order.id);
+        requireThat(new Set(reviewed.map(item => text(item.fields, 'count'))).size === reviewed.length, 'A production event cannot have duplicate scrap dispositions.');
+        for (const item of reviewed) requireThat(number(item.fields, 'quantity') === number(find(entities, text(item.fields, 'count'), 'count').fields, 'scrap'), 'Scrap disposition quantity must match its production event.');
     }
 };
 const metrics: Product['metrics'] = entities => [{ label: 'Good units', value: String(total(rows(entities, 'count'), 'good')) }, { label: 'Scrap units', value: String(total(rows(entities, 'count'), 'scrap')) }, { label: 'Active orders', value: String(rows(entities, 'order').filter(row => row.status === 'running').length) }];

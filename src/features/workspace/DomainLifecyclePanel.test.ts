@@ -56,3 +56,25 @@ describe('durable quality disposition', () => {
         expect(state.entities.filter(item => item.kind === 'inspection' && item.status === 'failed')).toHaveLength(2);
     });
 });
+
+describe('controlled scrap disposition', () => {
+    it('holds an order until a supervisor releases the exact recorded scrap event', () => {
+        let state = run(fresh(product), 'release', 'order-1', 'release', 'actor-0');
+        state = run(state, 'count', 'order-1', 'count', 'actor-1', { good: 95, scrap: 5 });
+        state = run(state, 'classify', 'count-1', 'classify-scrap', 'actor-2', { category: 'setup', rationale: 'Initial tooling setup produced dimensional rejects.' });
+        expect(state.entities.find(item => item.id === 'order-1')?.status).toBe('held');
+        expect(state.entities.find(item => item.id === 'classify-1')).toMatchObject({status: 'pending', fields: {count: 'count-1', quantity: 5, openedBy: 'actor-2'}});
+        expect(() => run(state, 'duplicate', 'count-1', 'classify-scrap', 'actor-2', { category: 'setup', rationale: 'Duplicate classification must remain blocked.' })).toThrow('already has');
+        state = run(state, 'release-scrap', 'classify-1', 'release-scrap', 'actor-0');
+        expect(state.entities.find(item => item.id === 'classify-1')).toMatchObject({status: 'released', fields: {releasedBy: 'actor-0'}});
+        expect(state.entities.find(item => item.id === 'order-1')?.status).toBe('running');
+        expect(state.entities.find(item => item.id === 'count-1')?.fields).toMatchObject({good: 95, scrap: 5});
+    });
+    it('rejects zero-scrap events without changing production state', () => {
+        let state = run(fresh(product), 'release', 'order-1', 'release', 'actor-0');
+        state = run(state, 'count', 'order-1', 'count', 'actor-1', { good: 100, scrap: 0 });
+        const before = structuredClone(state);
+        expect(() => run(state, 'classify', 'count-1', 'classify-scrap', 'actor-2', { category: 'quality', rationale: 'No scrap should not create a review.' })).toThrow('scrapped units');
+        expect(state).toEqual(before);
+    });
+});

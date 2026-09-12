@@ -66,3 +66,31 @@ test('operator downtime survives maintenance and resumes explicitly', async ({pa
  await expect(page.locator('.detail-title')).toContainText('running');
  await expect(page.getByRole('region',{name:'Production release gate'})).toContainText('resumed');
 });
+
+test('recorded scrap requires classified supervisor release before completion', async ({page}) => {
+ await page.goto('/operations');
+ const actor = page.getByRole('combobox',{name:'Current actor'});
+ const dialog = page.getByRole('dialog');
+ const save = async () => {await dialog.getByRole('button',{name:'Save command',exact:true}).click();await expect(dialog).toHaveCount(0);};
+ await page.getByRole('button',{name:/^Work orders/}).click();
+ await page.getByRole('button',{name:'Release production',exact:true}).click();await save();
+ await actor.selectOption('actor-1');
+ await page.getByRole('button',{name:'Record production count',exact:true}).click();
+ await dialog.getByLabel('Good units',{exact:true}).fill('95');
+ await dialog.getByLabel('Scrapped units',{exact:true}).fill('5');await save();
+ await page.getByRole('button',{name:/^Production events/}).click();
+ await actor.selectOption('actor-2');
+ await page.getByRole('button',{name:'Classify recorded scrap',exact:true}).click();
+ await dialog.getByRole('combobox',{name:'Scrap category',exact:true}).selectOption('setup');
+ await dialog.getByLabel('Disposition rationale',{exact:true}).fill('Initial tooling setup produced dimensional rejects.');await save();
+ await page.getByRole('button',{name:/^Work orders/}).click();
+ await expect(page.locator('.detail-title')).toContainText('held');
+ await page.getByRole('button',{name:/^Scrap dispositions/}).click();
+ await actor.selectOption('actor-0');
+ await page.getByRole('button',{name:'Release scrap disposition',exact:true}).click();await save();
+ await page.reload();await page.getByRole('button',{name:/^Scrap dispositions/}).click();
+ await expect(page.locator('.detail-title')).toContainText('released');
+ await expect(page.locator('.detail')).toContainText('5');
+ await page.getByRole('button',{name:/^Work orders/}).click();
+ await expect(page.locator('.detail-title')).toContainText('running');
+});
