@@ -38,3 +38,9 @@ Machine readiness combines selection, evaluation ownership, maintenance, and act
 30. **Too Hard:** integrate several live MES systems.
 
 Strong count: **19** Medium/Medium-Hard directions, supported by domain rules and stable browser-visible outcomes.
+
+## Depth expansion directions 31–40
+
+31. **Strong candidate · Medium-Hard:** release gate combines machine, material, and failed inspection evidence. 32. **Strong candidate · Medium:** production progress derives from immutable good and scrap events. 33. **Strong candidate · Medium-Hard:** refreshed lot quantity revokes a staged release. 34. **Strong candidate · Medium:** switching orders resets gate evidence ownership. 35. **Strong candidate · Medium-Hard:** late quality failure blocks completion after counts reach target. 36. **Strong candidate · Medium:** material requirement derives from target and per-unit demand. 37. **Strong candidate · Medium-Hard:** maintenance transition updates both readiness and release views. 38. **Strong candidate · Medium:** zero-target progress remains finite and visible. 39. **Too Easy:** rename the release gate. 40. **Too Hard:** replace release policy with live plant scheduling.
+
+Expanded strong count: **27**.
