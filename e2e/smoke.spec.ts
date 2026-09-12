@@ -38,3 +38,31 @@ test('failed production inspection executes rework and verified release', async 
     await page.getByRole('button', { name: /^Quality inspections/ }).click();
     await expect(page.locator('.detail-title')).toContainText('failed');
 });
+
+
+test('operator downtime survives maintenance and resumes explicitly', async ({page}) => {
+ await page.goto('/operations');
+ const actor = page.getByRole('combobox',{name:'Current actor'});
+ const dialog = page.getByRole('dialog');
+ const save = async () => {await dialog.getByRole('button',{name:'Save command',exact:true}).click();await expect(dialog).toHaveCount(0);};
+ await page.getByRole('button',{name:/^Work orders/}).click();
+ await page.getByRole('button',{name:'Release production',exact:true}).click(); await save();
+ await actor.selectOption('actor-1');
+ await page.getByRole('button',{name:'Run: Pause production',exact:true}).click();
+ await dialog.getByLabel('Stop reason',{exact:true}).fill('Planned tooling calibration stop.');await save();
+ await actor.selectOption('actor-0');
+ await page.getByRole('button',{name:/^Production machines/}).click();
+ await page.getByRole('button',{name:'Place machine on maintenance',exact:true}).click();
+ await dialog.getByLabel('Maintenance reason',{exact:true}).fill('Inspect tooling before restart.');await save();
+ await page.getByRole('button',{name:'Run: Resume stopped production',exact:true}).click();
+ await dialog.getByRole('button',{name:'Save command',exact:true}).click();
+ await expect(dialog.getByRole('alert')).toContainText('maintenance');await page.keyboard.press('Escape');
+ await page.getByRole('button',{name:/^Maintenance tickets/}).click();
+ await page.getByRole('button',{name:'Resolve maintenance',exact:true}).click();await save();
+ await page.getByRole('button',{name:/^Work orders/}).click();
+ await expect(page.locator('.detail-title')).toContainText('held');
+ await page.getByRole('button',{name:'Run: Resume stopped production',exact:true}).click();await save();
+ await page.reload(); await page.getByRole('button',{name:/^Work orders/}).click();
+ await expect(page.locator('.detail-title')).toContainText('running');
+ await expect(page.getByRole('region',{name:'Production release gate'})).toContainText('resumed');
+});

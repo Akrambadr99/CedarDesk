@@ -62,7 +62,7 @@ const operations: Operation[] = [
             const machine = find(state.entities, text(entity.fields, 'machine'));
             if (!linked(state.entities, 'maintenance', 'machine', machine.id).some(row => row.status === 'open')) {
                 machine.status = 'ready';
-                for (const order of linked(state.entities, 'order', 'machine', machine.id).filter(row => row.status === 'held' && qualityClear(state.entities, row.id)))
+                for (const order of linked(state.entities, 'order', 'machine', machine.id).filter(row => row.status === 'held' && qualityClear(state.entities, row.id) && !linked(state.entities, 'downtime', 'order', row.id).some(stop => stop.status === 'open')))
                     order.status = 'running';
             }
             return 'Maintenance resolved; eligible held work resumed.';
@@ -97,7 +97,7 @@ operations.push(
         const order = find(state.entities, text(entity.fields, 'order'), 'order');
         requireThat(find(state.entities, text(order.fields, 'machine'), 'machine').status === 'ready', 'Resolve machine maintenance before release.');
         entity.status = 'released';
-        if (qualityClear(state.entities, order.id)) order.status = 'running';
+        if (qualityClear(state.entities, order.id) && !linked(state.entities, 'downtime', 'order', order.id).some(stop => stop.status === 'open')) order.status = 'running';
         return 'Verified disposition released; production resumes only when all quality holds are resolved.';
     } },
     { key: 'retry-rework', label: 'Repeat failed rework', kind: 'disposition', from: ['performed'], roles: [roles[2]!], fields: [txt('plan', 'Revised rework instructions')], run: ({ state, entity, input, add }) => {
@@ -108,6 +108,26 @@ operations.push(
         add('disposition', 'Recovery · ' + entity.title, { order: text(entity.fields, 'order'), inspection: verification.id, plan: text(input, 'plan').trim(), evidence: 'Awaiting execution' });
         return 'Recovery plan appended; prior execution and failed verification preserved.';
     } },
+);
+
+kinds.push(kind('downtime', 'Production downtime', ['open', 'resumed'], [], [ref('order', 'Work order', 'order'), txt('reason', 'Stop reason'), txt('startedBy', 'Stopped by'), txt('startedAt', 'Stopped at'), {...txt('resumedAt', 'Resumed at'), required: false}]));
+operations.push(
+    {key: 'pause-production', label: 'Pause production', kind: 'order', from: ['running'], roles: [roles[0]!, roles[1]!], fields: [txt('reason', 'Stop reason')], run: ({state, entity, input, actor, now, add}) => {
+        requireThat(text(input, 'reason').trim().length >= 12, 'Describe the production stop in at least 12 characters.');
+        requireThat(!linked(state.entities, 'downtime', 'order', entity.id).some(item => item.status === 'open'), 'An open production stop already exists.');
+        add('downtime', 'Production stop - ' + entity.title, {order: entity.id, reason: text(input, 'reason').trim(), startedBy: actor.id, startedAt: now});
+        entity.status = 'held'; return 'Production paused; consumed material and production events preserved.';
+    }},
+    {key: 'resume-production', label: 'Resume stopped production', kind: 'downtime', from: ['open'], roles: [roles[0]!, roles[1]!], run: ({state, entity, actor, now}) => {
+        requireThat(actor.id === entity.fields['startedBy'] || actor.role === roles[0], 'Only the stopping operator or supervisor can resume production.');
+        const order = find(state.entities, text(entity.fields, 'order'), 'order');
+        requireThat(order.status === 'held', 'Production is no longer held.');
+        requireThat(find(state.entities, text(order.fields, 'machine'), 'machine').status === 'ready', 'Resolve machine maintenance before resuming.');
+        requireThat(qualityClear(state.entities, order.id), 'Resolve quality holds before resuming.');
+        requireThat(Date.parse(now) >= Date.parse(text(entity.fields, 'startedAt')), 'Resume time cannot precede the production stop.');
+        entity.status = 'resumed'; entity.fields['resumedAt'] = now; order.status = 'running';
+        return 'Production resumed with original counts and material allocation; downtime retained.';
+    }},
 );
 const validate: Product['validate'] = entities => {
     for (const order of rows(entities, 'order')) {
