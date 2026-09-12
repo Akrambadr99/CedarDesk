@@ -48,8 +48,8 @@ const operations: Operation[] = [
             return 'Released run, consumed staged material and opened quality gate.';
         } },
     { key: 'count', label: 'Record production count', kind: 'order', from: ['running'], roles: [roles[1]!], fields: [num('good', 'Good units', 10), num('scrap', 'Scrapped units')], run: ({ state, entity, input, add }) => { const machine = find(state.entities, text(entity.fields, 'machine')); requireThat(machine.status === 'ready', 'Machine is under maintenance.'); requireThat(number(input, 'good') + number(input, 'scrap') > 0, 'Record at least one produced unit.'); const made = total(linked(state.entities, 'count', 'order', entity.id), 'good') + total(linked(state.entities, 'count', 'order', entity.id), 'scrap'); requireThat(made + number(input, 'good') + number(input, 'scrap') <= number(entity.fields, 'target'), 'Count exceeds material-backed production target.'); add('count', 'Operator production event', { order: entity.id, good: number(input, 'good'), scrap: number(input, 'scrap'), source: 'operator' }); return 'Production count appended; counters recomputed from events.'; } },
-    { key: 'inspect', label: 'Record quality decision', kind: 'inspection', from: ['pending'], roles: [roles[2]!], fields: [choice('result', 'Decision', ['passed', 'failed'])], run: ({ entity, input }) => { entity.status = text(input, 'result'); return 'Quality engineer recorded ' + entity.status + ' inspection.'; } },
-    { key: 'complete', label: 'Complete batch', kind: 'order', from: ['running'], roles: [roles[0]!], run: ({ state, entity }) => { const counts = linked(state.entities, 'count', 'order', entity.id); requireThat(total(counts, 'good') + total(counts, 'scrap') === number(entity.fields, 'target'), 'All staged units must be accounted for.'); const gates = linked(state.entities, 'inspection', 'order', entity.id); requireThat(gates.length > 0 && gates.every(row => row.status === 'passed'), 'Every quality inspection must pass.'); entity.status = 'complete'; return 'Batch completed with production and quality evidence.'; } },
+    { key: 'inspect', label: 'Record quality decision', kind: 'inspection', from: ['pending'], roles: [roles[2]!], fields: [choice('result', 'Decision', ['passed', 'failed'])], run: ({ state, entity, input }) => { entity.status = text(input, 'result'); const order = find(state.entities, text(entity.fields, 'order')); if (entity.status === 'failed' && order.status === 'running') order.status = 'held'; return 'Quality engineer recorded ' + entity.status + ' inspection.'; } },
+    { key: 'complete', label: 'Complete batch', kind: 'order', from: ['running'], roles: [roles[0]!], run: ({ state, entity }) => { const counts = linked(state.entities, 'count', 'order', entity.id); requireThat(total(counts, 'good') + total(counts, 'scrap') === number(entity.fields, 'target'), 'All staged units must be accounted for.'); const gates = linked(state.entities, 'inspection', 'order', entity.id); requireThat(gates.length > 0 && gates.every(row => row.status === 'passed' || rows(state.entities, 'disposition').some(item => item.fields['inspection'] === row.id && item.status === 'released')), 'Every quality inspection must pass.'); entity.status = 'complete'; return 'Batch completed with production and quality evidence.'; } },
     { key: 'hold', label: 'Place machine on maintenance', kind: 'machine', from: ['ready'], roles: [roles[0]!], fields: [txt('reason', 'Maintenance reason')], run: ({ state, entity, input, add }) => {
             entity.status = 'maintenance';
             for (const order of linked(state.entities, 'order', 'machine', entity.id).filter(row => row.status === 'running'))
@@ -62,13 +62,53 @@ const operations: Operation[] = [
             const machine = find(state.entities, text(entity.fields, 'machine'));
             if (!linked(state.entities, 'maintenance', 'machine', machine.id).some(row => row.status === 'open')) {
                 machine.status = 'ready';
-                for (const order of linked(state.entities, 'order', 'machine', machine.id).filter(row => row.status === 'held'))
+                for (const order of linked(state.entities, 'order', 'machine', machine.id).filter(row => row.status === 'held' && qualityClear(state.entities, row.id)))
                     order.status = 'running';
             }
             return 'Maintenance resolved; eligible held work resumed.';
         } },
 ];
 const seed = [entity('lot-1', 'lot', 'Aluminium coil A', 'released', { material: 'AL-6061', quantity: 1000 }), entity('machine-1', 'machine', 'Press 04', 'ready', { capacity: 500, line: 'North assembly' }), entity('order-1', 'order', 'Pump housing batch', 'queued', { lot: 'lot-1', machine: 'machine-1', target: 100, materialPerUnit: 2, due: '2026-10-15' })];
+const qualityClear = (entities: Entity[], orderId: string) => linked(entities, 'inspection', 'order', orderId).every(inspection => inspection.status !== 'failed' || rows(entities, 'disposition').some(item => item.fields['inspection'] === inspection.id && item.status === 'released')) && linked(entities, 'disposition', 'order', orderId).every(item => item.status === 'released');
+kinds.push(kind('disposition', 'Quality dispositions', ['planned', 'performed', 'released'], [], [ref('order', 'Affected work order', 'order'), ref('inspection', 'Failed inspection', 'inspection'), txt('plan', 'Rework instructions'), txt('evidence', 'Execution evidence'), { ...ref('verification', 'Verification inspection', 'inspection'), required: false }]));
+operations.push(
+    { key: 'plan-rework', label: 'Plan quality rework', kind: 'inspection', from: ['failed'], roles: [roles[2]!], fields: [txt('plan', 'Rework instructions')], run: ({ state, entity, input, add }) => {
+        const order = find(state.entities, text(entity.fields, 'order'), 'order');
+        requireThat(['running', 'held'].includes(order.status), 'Only active production can enter rework.');
+        requireThat(!rows(state.entities, 'disposition').some(item => item.fields['inspection'] === entity.id), 'A disposition already exists for this finding.');
+        requireThat(text(input, 'plan').trim().length >= 12, 'Provide specific rework instructions.');
+        order.status = 'held';
+        add('disposition', 'Rework · ' + order.title, { order: order.id, inspection: entity.id, plan: text(input, 'plan').trim(), evidence: 'Awaiting execution' });
+        return 'Rework planned; production held and failed inspection preserved.';
+    } },
+    { key: 'perform-rework', label: 'Record completed rework', kind: 'disposition', from: ['planned'], roles: [roles[1]!], fields: [txt('evidence', 'Execution evidence')], run: ({ state, entity, input, add }) => {
+        const order = find(state.entities, text(entity.fields, 'order'), 'order');
+        requireThat(order.status === 'held' && find(state.entities, text(order.fields, 'machine'), 'machine').status === 'ready', 'Rework requires held production and a ready machine.');
+        requireThat(text(input, 'evidence').trim().length >= 12, 'Describe the completed rework.');
+        const inspection = add('inspection', 'Rework verification · ' + order.title, { order: order.id, criterion: text(entity.fields, 'plan') });
+        entity.fields['verification'] = inspection.id;
+        entity.fields['evidence'] = text(input, 'evidence').trim();
+        entity.status = 'performed';
+        return 'Rework execution recorded; independent quality verification required.';
+    } },
+    { key: 'release-rework', label: 'Release verified rework', kind: 'disposition', from: ['performed'], roles: [roles[2]!], run: ({ state, entity }) => {
+        const inspection = find(state.entities, text(entity.fields, 'verification'), 'inspection');
+        requireThat(inspection.status === 'passed' || rows(state.entities, 'disposition').some(item => item.fields['inspection'] === inspection.id && item.status === 'released'), 'The rework verification inspection must pass.');
+        const order = find(state.entities, text(entity.fields, 'order'), 'order');
+        requireThat(find(state.entities, text(order.fields, 'machine'), 'machine').status === 'ready', 'Resolve machine maintenance before release.');
+        entity.status = 'released';
+        if (qualityClear(state.entities, order.id)) order.status = 'running';
+        return 'Verified disposition released; production resumes only when all quality holds are resolved.';
+    } },
+    { key: 'retry-rework', label: 'Repeat failed rework', kind: 'disposition', from: ['performed'], roles: [roles[2]!], fields: [txt('plan', 'Revised rework instructions')], run: ({ state, entity, input, add }) => {
+        const verification = find(state.entities, text(entity.fields, 'verification'), 'inspection');
+        requireThat(verification.status === 'failed', 'Only failed verification can be repeated.');
+        requireThat(text(input, 'plan').trim().length >= 12, 'Provide specific rework instructions.');
+        requireThat(!rows(state.entities, 'disposition').some(item => item.fields['inspection'] === verification.id), 'Recovery is already planned for this verification.');
+        add('disposition', 'Recovery · ' + entity.title, { order: text(entity.fields, 'order'), inspection: verification.id, plan: text(input, 'plan').trim(), evidence: 'Awaiting execution' });
+        return 'Recovery plan appended; prior execution and failed verification preserved.';
+    } },
+);
 const validate: Product['validate'] = entities => {
     for (const order of rows(entities, 'order')) {
         const counts = linked(entities, 'count', 'order', order.id);

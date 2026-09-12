@@ -1,1 +1,40 @@
 import{expect,test}from'@playwright/test';test('ForgeAxis exposes routed enterprise workflows',async({page})=>{await page.goto('/');await expect(page.getByRole('heading',{name:'ForgeAxis command center'})).toBeVisible();await page.getByRole('link',{name:'Operations'}).click();const review=page.getByRole('region',{name:'Machine readiness review'});await review.getByRole('button',{name:'Evaluate release'}).click();await expect(review).toContainText(/ready|blocked/);await page.getByRole('link',{name:'Workflows'}).click();await expect(page.getByRole('heading',{name:'Workflow catalog'})).toBeVisible();await page.getByRole('link',{name:'Data model'}).click();await expect(page.getByRole('heading',{name:'Connected data model'})).toBeVisible();await page.getByRole('link',{name:'Data tools'}).click();await expect(page.getByRole('heading',{name:'Import and recovery tools'})).toBeVisible();await page.getByRole('textbox',{name:'Workspace JSON'}).fill('{}');await page.getByRole('button',{name:'Preview import'}).click();await expect(page.getByRole('alert')).toContainText('not a compatible');await page.getByRole('link',{name:'Activity',exact:true}).click();await expect(page.getByRole('heading',{name:'Operational activity'})).toBeVisible()})
+
+test('failed production inspection executes rework and verified release', async ({ page }) => {
+    await page.goto('/operations');
+    const actor = page.getByRole('combobox', { name: 'Current actor' });
+    const action = async (name: string) => page.getByRole('button', { name, exact: true }).click();
+    const save = async () => { await action('Save command'); await expect(page.getByRole('dialog')).toHaveCount(0); };
+    await page.getByRole('button', { name: /^Work orders/ }).click();
+    await action('Release production'); await save();
+    await actor.selectOption('actor-1');
+    await action('Record production count');
+    await page.getByRole('spinbutton', { name: 'Good units', exact: true }).fill('100'); await save();
+    await page.getByRole('button', { name: /^Quality inspections/ }).click();
+    await actor.selectOption('actor-2');
+    await action('Record quality decision');
+    await page.getByRole('combobox', { name: 'Decision', exact: true }).selectOption('failed'); await save();
+    await action('Plan quality rework');
+    await page.getByRole('textbox', { name: 'Rework instructions', exact: true }).fill('Rework the housing mating surface.'); await save();
+    await page.getByRole('button', { name: /^Quality dispositions/ }).click();
+    await actor.selectOption('actor-1');
+    await action('Record completed rework');
+    await page.getByRole('textbox', { name: 'Execution evidence', exact: true }).fill('Surface reworked to drawing tolerance.'); await save();
+    await actor.selectOption('actor-2');
+    await action('Release verified rework'); await action('Save command');
+    await expect(page.getByRole('alert')).toContainText('must pass');
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: /^Quality inspections/ }).click();
+    await page.getByRole('button', { name: /^Rework verification/ }).click();
+    await action('Record quality decision'); await save();
+    await page.getByRole('button', { name: /^Quality dispositions/ }).click();
+    await action('Release verified rework'); await save();
+    await actor.selectOption('actor-0');
+    await page.getByRole('button', { name: /^Work orders/ }).click();
+    await action('Complete batch'); await save();
+    await page.reload();
+    await page.getByRole('button', { name: /^Work orders/ }).click();
+    await expect(page.locator('.detail-title')).toContainText('complete');
+    await page.getByRole('button', { name: /^Quality inspections/ }).click();
+    await expect(page.locator('.detail-title')).toContainText('failed');
+});
