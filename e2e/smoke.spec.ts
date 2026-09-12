@@ -94,3 +94,36 @@ test('recorded scrap requires classified supervisor release before completion', 
  await page.getByRole('button',{name:/^Work orders/}).click();
  await expect(page.locator('.detail-title')).toContainText('running');
 });
+
+
+test('machine changeover rejection and quality release govern production', async ({ page }) => {
+    await page.goto('/operations');
+    const actor = page.getByRole('combobox', { name: 'Current actor' });
+    const dialog = page.getByRole('dialog');
+    const save = async () => { await dialog.getByRole('button', { name: 'Save command', exact: true }).click(); await expect(dialog).toHaveCount(0); };
+    const material = await page.locator('.detail dl').innerText();
+    const materialCode = material.split('Material code')[1]?.trim().split(/\s+/)[0] ?? '';
+    await page.getByRole('button', { name: /^Production machines/ }).click();
+    await page.getByRole('button', { name: 'Request machine changeover', exact: true }).click();
+    await dialog.getByLabel('Target material', { exact: true }).fill(materialCode);
+    await dialog.getByLabel('Changeover evidence', { exact: true }).fill('Clear the previous batch and prepare the line for this material.');
+    await save();
+    await page.getByRole('button', { name: /^Machine changeovers/ }).click();
+    await actor.selectOption('actor-1');
+    await page.getByRole('button', { name: 'Submit setup evidence', exact: true }).click();
+    await dialog.getByLabel('Changeover evidence', { exact: true }).fill('Operator confirms cleaning and tooling alignment are complete.');await save();
+    await actor.selectOption('actor-2');
+    await page.getByRole('button', { name: 'Reject setup evidence', exact: true }).click();
+    await dialog.getByLabel('Changeover evidence', { exact: true }).fill('Inspectors found residue requiring another cleaning pass.');await save();
+    await actor.selectOption('actor-1');
+    await page.getByRole('button', { name: 'Submit setup evidence', exact: true }).click();
+    await dialog.getByLabel('Changeover evidence', { exact: true }).fill('Cleaning repeated and residue removed from the tooling.');await save();
+    await actor.selectOption('actor-2');
+    await page.getByRole('button', { name: 'Release verified setup', exact: true }).click();
+    await dialog.getByLabel('Changeover evidence', { exact: true }).fill('Independent quality inspection confirms safe material setup.');await save();
+    await page.reload();
+    await actor.selectOption('actor-0');
+    await page.getByRole('button', { name: /^Work orders/ }).click();
+    await page.getByRole('button', { name: 'Release production', exact: true }).click();await save();
+    await expect(page.locator('.detail-title')).toContainText('running');
+});

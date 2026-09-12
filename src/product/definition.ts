@@ -1,3 +1,4 @@
+import { changeoverKind, changeoverOperations } from '../factory/changeover-workflow';
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import type { Product, Kind, Field, Operation, Entity } from '../workspace/types';
 import { entity, find, rows, total, text, number, requireThat, money, overlaps } from '../workspace/values';
@@ -27,7 +28,7 @@ void overlaps;
 const roles = ['Supervisor', 'Operator', 'Quality Engineer', 'Auditor'];
 const kinds = [
     kind('lot', 'Material lots', ['released', 'quarantine', 'consumed'], [roles[0]!], [txt('material', 'Material code'), num('quantity', 'Available kilograms', 1000)]),
-    kind('machine', 'Production machines', ['ready', 'maintenance'], [roles[0]!], [num('capacity', 'Units per shift', 500, 1), txt('line', 'Production line')]),
+    kind('machine', 'Production machines', ['ready', 'maintenance', 'changeover'], [roles[0]!], [num('capacity', 'Units per shift', 500, 1), txt('line', 'Production line'), { ...txt('configuredMaterial', 'Configured material'), required: false }]),
     kind('order', 'Work orders', ['queued', 'running', 'held', 'complete'], [roles[0]!], [ref('lot', 'Material lot', 'lot'), ref('machine', 'Machine', 'machine'), num('target', 'Target good units', 100, 1), num('materialPerUnit', 'Kilograms per unit', 2, 1), date('due', 'Due date')]),
     kind('count', 'Production events', ['recorded'], [], [ref('order', 'Work order', 'order'), num('good', 'Good units'), num('scrap', 'Scrapped units'), txt('source', 'Count source')]),
     kind('inspection', 'Quality inspections', ['pending', 'passed', 'failed'], [roles[0]!], [ref('order', 'Work order', 'order'), txt('criterion', 'Acceptance criterion')]),
@@ -38,6 +39,7 @@ const operations: Operation[] = [
             const lot = find(state.entities, text(entity.fields, 'lot')), machine = find(state.entities, text(entity.fields, 'machine'));
             requireThat(lot.status === 'released' && machine.status === 'ready', 'Machine and material must both be released.');
             requireThat(!rows(state.entities, 'order').some(row => row.id !== entity.id && row.fields['machine'] === machine.id && ['running', 'held'].includes(row.status)), 'Machine already has active work.');
+            requireThat(!machine.fields['configuredMaterial'] || machine.fields['configuredMaterial'] === lot.fields['material'], 'Machine setup does not match the production material.');
             const need = number(entity.fields, 'target') * number(entity.fields, 'materialPerUnit');
             requireThat(number(lot.fields, 'quantity') >= need, 'Insufficient material for this production run.');
             lot.fields['quantity'] = number(lot.fields, 'quantity') - need;
@@ -155,6 +157,8 @@ operations.push(
         return 'Production resumed with original counts and material allocation; downtime retained.';
     }},
 );
+kinds.push(changeoverKind);
+operations.push(...changeoverOperations);
 const validate: Product['validate'] = entities => {
     for (const order of rows(entities, 'order')) {
         const counts = linked(entities, 'count', 'order', order.id);
