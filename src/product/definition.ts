@@ -28,7 +28,7 @@ void overlaps;
 const roles = ['Supervisor', 'Operator', 'Quality Engineer', 'Auditor'];
 const kinds = [
     kind('lot', 'Material lots', ['released', 'quarantine', 'consumed'], [roles[0]!], [txt('material', 'Material code'), num('quantity', 'Available kilograms', 1000)]),
-    kind('machine', 'Production machines', ['ready', 'maintenance', 'changeover'], [roles[0]!], [num('capacity', 'Units per shift', 500, 1), txt('line', 'Production line'), { ...txt('configuredMaterial', 'Configured material'), required: false }]),
+    kind('machine', 'Production machines', ['ready', 'maintenance', 'changeover'], [roles[0]!], [num('capacity', 'Units per shift', 500, 1), txt('line', 'Production line'), { ...txt('configuredMaterial', 'Configured material'), required: false, editLocked: true }]),
     kind('order', 'Work orders', ['queued', 'running', 'held', 'complete'], [roles[0]!], [ref('lot', 'Material lot', 'lot'), ref('machine', 'Machine', 'machine'), num('target', 'Target good units', 100, 1), num('materialPerUnit', 'Kilograms per unit', 2, 1), date('due', 'Due date')]),
     kind('count', 'Production events', ['recorded'], [], [ref('order', 'Work order', 'order'), num('good', 'Good units'), num('scrap', 'Scrapped units'), txt('source', 'Count source')]),
     kind('inspection', 'Quality inspections', ['pending', 'passed', 'failed'], [roles[0]!], [ref('order', 'Work order', 'order'), txt('criterion', 'Acceptance criterion')]),

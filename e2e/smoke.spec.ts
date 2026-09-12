@@ -123,6 +123,10 @@ test('machine changeover rejection and quality release govern production', async
     await dialog.getByLabel('Changeover evidence', { exact: true }).fill('Independent quality inspection confirms safe material setup.');await save();
     await page.reload();
     await actor.selectOption('actor-0');
+    await page.getByRole('button', { name: /^Production machines/ }).click();
+    await page.getByRole('button', { name: 'Edit draft', exact: true }).click();
+    await expect(dialog.getByLabel('Configured material', { exact: true })).toBeDisabled();
+    await page.keyboard.press('Escape');
     await page.getByRole('button', { name: /^Work orders/ }).click();
     await page.getByRole('button', { name: 'Release production', exact: true }).click();await save();
     await expect(page.locator('.detail-title')).toContainText('running');

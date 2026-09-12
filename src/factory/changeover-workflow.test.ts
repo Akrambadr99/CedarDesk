@@ -49,3 +49,9 @@ describe('machine setup execution', () => {
         expect(JSON.stringify(state)).toBe(before);
     });
 });
+
+it('does not allow machine edits to bypass quality-controlled configuration', () => {
+    const state = fresh(product);const machine = state.entities.find(item => item.id === 'machine-1')!;
+    expect(() => execute(state, { id: 'bypass', expectedRevision: 0, actorId: 'actor-0', type: 'edit', entityId: machine.id,
+        title: machine.title, input: { ...machine.fields, configuredMaterial: 'UNREVIEWED' } }, product, '2026-09-13T12:00:00Z')).toThrow(/governed workflow/);
+});
