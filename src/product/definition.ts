@@ -1,34 +1,79 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-import type { Product, Kind, Field, Operation, Entity } from '../workspace/types'
-import { entity, find, rows, total, text, number, requireThat, money, overlaps } from '../workspace/values'
-const txt = (key: string, label: string): Field => ({ key, label, type: 'text', required: true })
-const num = (key: string, label: string, initial = 0, min = 0, max = Number.MAX_SAFE_INTEGER): Field => ({ key, label, type: 'number', required: true, integer: true, initial, min, max })
-const date = (key: string, label: string): Field => ({ key, label, type: 'date', required: true, initial: '2026-09-12' })
-const ref = (key: string, label: string, reference: string): Field => ({ key, label, type: 'reference', reference, required: true })
-const choice = (key: string, label: string, options: string[]): Field => ({ key, label, type: 'select', options, required: true, initial: options[0] ?? '' })
-const kind = (key: string, label: string, states: string[], editors: string[], fields: Field[]): Kind => ({ key, label, states, editors, fields, initial: states[0] ?? 'draft' })
-const linked = (entities: Entity[], kind: string, key: string, id: string) => rows(entities, kind).filter(item => item.fields[key] === id)
-void txt; void num; void date; void ref; void choice; void kind; void linked; void entity; void find; void rows; void total; void text; void number; void requireThat; void money; void overlaps
-
-const roles=['Supervisor','Operator','Quality Engineer','Auditor']
-const kinds=[
-kind('lot','Material lots',['released','quarantine','consumed'],[roles[0]!],[txt('material','Material code'),num('quantity','Available kilograms',1000)]),
-kind('machine','Production machines',['ready','maintenance'],[roles[0]!],[num('capacity','Units per shift',500,1),txt('line','Production line')]),
-kind('order','Work orders',['queued','running','held','complete'],[roles[0]!],[ref('lot','Material lot','lot'),ref('machine','Machine','machine'),num('target','Target good units',100,1),num('materialPerUnit','Kilograms per unit',2,1),date('due','Due date')]),
-kind('count','Production events',['recorded'],[],[ref('order','Work order','order'),num('good','Good units'),num('scrap','Scrapped units'),txt('source','Count source')]),
-kind('inspection','Quality inspections',['pending','passed','failed'],[roles[0]!],[ref('order','Work order','order'),txt('criterion','Acceptance criterion')]),
-kind('maintenance','Maintenance tickets',['open','resolved'],[roles[0]!,roles[1]!],[ref('machine','Machine','machine'),txt('reason','Fault details')]),
-]
-const operations:Operation[]=[
-{key:'release',label:'Release production',kind:'order',from:['queued'],roles:[roles[0]!],run:({state,entity,add})=>{const lot=find(state.entities,text(entity.fields,'lot')),machine=find(state.entities,text(entity.fields,'machine'));requireThat(lot.status==='released'&&machine.status==='ready','Machine and material must both be released.');requireThat(!rows(state.entities,'order').some(row=>row.id!==entity.id&&row.fields['machine']===machine.id&&['running','held'].includes(row.status)),'Machine already has active work.');const need=number(entity.fields,'target')*number(entity.fields,'materialPerUnit');requireThat(number(lot.fields,'quantity')>=need,'Insufficient material for this production run.');lot.fields['quantity']=number(lot.fields,'quantity')-need;if(lot.fields['quantity']===0)lot.status='consumed';entity.status='running';add('inspection','Final inspection · '+entity.title,{order:entity.id,criterion:'Dimensional and finish checks'});return 'Released run, consumed staged material and opened quality gate.'}},
-{key:'count',label:'Record production count',kind:'order',from:['running'],roles:[roles[1]!],fields:[num('good','Good units',10),num('scrap','Scrapped units')],run:({state,entity,input,add})=>{const machine=find(state.entities,text(entity.fields,'machine'));requireThat(machine.status==='ready','Machine is under maintenance.');requireThat(number(input,'good')+number(input,'scrap')>0,'Record at least one produced unit.');const made=total(linked(state.entities,'count','order',entity.id),'good')+total(linked(state.entities,'count','order',entity.id),'scrap');requireThat(made+number(input,'good')+number(input,'scrap')<=number(entity.fields,'target'),'Count exceeds material-backed production target.');add('count','Operator production event',{order:entity.id,good:number(input,'good'),scrap:number(input,'scrap'),source:'operator'});return 'Production count appended; counters recomputed from events.'}},
-{key:'inspect',label:'Record quality decision',kind:'inspection',from:['pending'],roles:[roles[2]!],fields:[choice('result','Decision',['passed','failed'])],run:({entity,input})=>{entity.status=text(input,'result');return 'Quality engineer recorded '+entity.status+' inspection.'}},
-{key:'complete',label:'Complete batch',kind:'order',from:['running'],roles:[roles[0]!],run:({state,entity})=>{const counts=linked(state.entities,'count','order',entity.id);requireThat(total(counts,'good')+total(counts,'scrap')===number(entity.fields,'target'),'All staged units must be accounted for.');const gates=linked(state.entities,'inspection','order',entity.id);requireThat(gates.length>0&&gates.every(row=>row.status==='passed'),'Every quality inspection must pass.');entity.status='complete';return 'Batch completed with production and quality evidence.'}},
-{key:'hold',label:'Place machine on maintenance',kind:'machine',from:['ready'],roles:[roles[0]!],fields:[txt('reason','Maintenance reason')],run:({state,entity,input,add})=>{entity.status='maintenance';for(const order of linked(state.entities,'order','machine',entity.id).filter(row=>row.status==='running'))order.status='held';add('maintenance','Maintenance · '+entity.title,{machine:entity.id,reason:text(input,'reason')});return 'Machine removed from production; active work held.'}},
-{key:'repair',label:'Resolve maintenance',kind:'maintenance',from:['open'],roles:[roles[0]!],run:({state,entity})=>{entity.status='resolved';const machine=find(state.entities,text(entity.fields,'machine'));if(!linked(state.entities,'maintenance','machine',machine.id).some(row=>row.status==='open')){machine.status='ready';for(const order of linked(state.entities,'order','machine',machine.id).filter(row=>row.status==='held'))order.status='running'}return 'Maintenance resolved; eligible held work resumed.'}},
-]
-const seed=[entity('lot-1','lot','Aluminium coil A','released',{material:'AL-6061',quantity:1000}),entity('machine-1','machine','Press 04','ready',{capacity:500,line:'North assembly'}),entity('order-1','order','Pump housing batch','queued',{lot:'lot-1',machine:'machine-1',target:100,materialPerUnit:2,due:'2026-10-15'})]
-const validate:Product['validate']=entities=>{for(const order of rows(entities,'order')){const counts=linked(entities,'count','order',order.id);requireThat(total(counts,'good')+total(counts,'scrap')<=number(order.fields,'target'),'Production counts exceed target.')}}
-const metrics:Product['metrics']=entities=>[{label:'Good units',value:String(total(rows(entities,'count'),'good'))},{label:'Scrap units',value:String(total(rows(entities,'count'),'scrap'))},{label:'Active orders',value:String(rows(entities,'order').filter(row=>row.status==='running').length)}]
-
-export const product: Product = { name: 'ForgeAxis', description: 'Material-backed production and quality release', accent: '#9a3412', actors: roles.map((role,index)=>({id:'actor-'+String(index),name:['Maya Hassan','Omar Saleh','Lina Farouk','Nadia Ali'][index] ?? role,role})), kinds,operations,seed,validate,metrics }
+import type { Product, Kind, Field, Operation, Entity } from '../workspace/types';
+import { entity, find, rows, total, text, number, requireThat, money, overlaps } from '../workspace/values';
+const txt = (key: string, label: string): Field => ({ key, label, type: 'text', required: true });
+const num = (key: string, label: string, initial = 0, min = 0, max = Number.MAX_SAFE_INTEGER): Field => ({ key, label, type: 'number', required: true, integer: true, initial, min, max });
+const date = (key: string, label: string): Field => ({ key, label, type: 'date', required: true, initial: '2026-09-12' });
+const ref = (key: string, label: string, reference: string): Field => ({ key, label, type: 'reference', reference, required: true });
+const choice = (key: string, label: string, options: string[]): Field => ({ key, label, type: 'select', options, required: true, initial: options[0] ?? '' });
+const kind = (key: string, label: string, states: string[], editors: string[], fields: Field[]): Kind => ({ key, label, states, editors, fields, initial: states[0] ?? 'draft' });
+const linked = (entities: Entity[], kind: string, key: string, id: string) => rows(entities, kind).filter(item => item.fields[key] === id);
+void txt;
+void num;
+void date;
+void ref;
+void choice;
+void kind;
+void linked;
+void entity;
+void find;
+void rows;
+void total;
+void text;
+void number;
+void requireThat;
+void money;
+void overlaps;
+const roles = ['Supervisor', 'Operator', 'Quality Engineer', 'Auditor'];
+const kinds = [
+    kind('lot', 'Material lots', ['released', 'quarantine', 'consumed'], [roles[0]!], [txt('material', 'Material code'), num('quantity', 'Available kilograms', 1000)]),
+    kind('machine', 'Production machines', ['ready', 'maintenance'], [roles[0]!], [num('capacity', 'Units per shift', 500, 1), txt('line', 'Production line')]),
+    kind('order', 'Work orders', ['queued', 'running', 'held', 'complete'], [roles[0]!], [ref('lot', 'Material lot', 'lot'), ref('machine', 'Machine', 'machine'), num('target', 'Target good units', 100, 1), num('materialPerUnit', 'Kilograms per unit', 2, 1), date('due', 'Due date')]),
+    kind('count', 'Production events', ['recorded'], [], [ref('order', 'Work order', 'order'), num('good', 'Good units'), num('scrap', 'Scrapped units'), txt('source', 'Count source')]),
+    kind('inspection', 'Quality inspections', ['pending', 'passed', 'failed'], [roles[0]!], [ref('order', 'Work order', 'order'), txt('criterion', 'Acceptance criterion')]),
+    kind('maintenance', 'Maintenance tickets', ['open', 'resolved'], [roles[0]!, roles[1]!], [ref('machine', 'Machine', 'machine'), txt('reason', 'Fault details')]),
+];
+const operations: Operation[] = [
+    { key: 'release', label: 'Release production', kind: 'order', from: ['queued'], roles: [roles[0]!], run: ({ state, entity, add }) => {
+            const lot = find(state.entities, text(entity.fields, 'lot')), machine = find(state.entities, text(entity.fields, 'machine'));
+            requireThat(lot.status === 'released' && machine.status === 'ready', 'Machine and material must both be released.');
+            requireThat(!rows(state.entities, 'order').some(row => row.id !== entity.id && row.fields['machine'] === machine.id && ['running', 'held'].includes(row.status)), 'Machine already has active work.');
+            const need = number(entity.fields, 'target') * number(entity.fields, 'materialPerUnit');
+            requireThat(number(lot.fields, 'quantity') >= need, 'Insufficient material for this production run.');
+            lot.fields['quantity'] = number(lot.fields, 'quantity') - need;
+            if (lot.fields['quantity'] === 0)
+                lot.status = 'consumed';
+            entity.status = 'running';
+            add('inspection', 'Final inspection · ' + entity.title, { order: entity.id, criterion: 'Dimensional and finish checks' });
+            return 'Released run, consumed staged material and opened quality gate.';
+        } },
+    { key: 'count', label: 'Record production count', kind: 'order', from: ['running'], roles: [roles[1]!], fields: [num('good', 'Good units', 10), num('scrap', 'Scrapped units')], run: ({ state, entity, input, add }) => { const machine = find(state.entities, text(entity.fields, 'machine')); requireThat(machine.status === 'ready', 'Machine is under maintenance.'); requireThat(number(input, 'good') + number(input, 'scrap') > 0, 'Record at least one produced unit.'); const made = total(linked(state.entities, 'count', 'order', entity.id), 'good') + total(linked(state.entities, 'count', 'order', entity.id), 'scrap'); requireThat(made + number(input, 'good') + number(input, 'scrap') <= number(entity.fields, 'target'), 'Count exceeds material-backed production target.'); add('count', 'Operator production event', { order: entity.id, good: number(input, 'good'), scrap: number(input, 'scrap'), source: 'operator' }); return 'Production count appended; counters recomputed from events.'; } },
+    { key: 'inspect', label: 'Record quality decision', kind: 'inspection', from: ['pending'], roles: [roles[2]!], fields: [choice('result', 'Decision', ['passed', 'failed'])], run: ({ entity, input }) => { entity.status = text(input, 'result'); return 'Quality engineer recorded ' + entity.status + ' inspection.'; } },
+    { key: 'complete', label: 'Complete batch', kind: 'order', from: ['running'], roles: [roles[0]!], run: ({ state, entity }) => { const counts = linked(state.entities, 'count', 'order', entity.id); requireThat(total(counts, 'good') + total(counts, 'scrap') === number(entity.fields, 'target'), 'All staged units must be accounted for.'); const gates = linked(state.entities, 'inspection', 'order', entity.id); requireThat(gates.length > 0 && gates.every(row => row.status === 'passed'), 'Every quality inspection must pass.'); entity.status = 'complete'; return 'Batch completed with production and quality evidence.'; } },
+    { key: 'hold', label: 'Place machine on maintenance', kind: 'machine', from: ['ready'], roles: [roles[0]!], fields: [txt('reason', 'Maintenance reason')], run: ({ state, entity, input, add }) => {
+            entity.status = 'maintenance';
+            for (const order of linked(state.entities, 'order', 'machine', entity.id).filter(row => row.status === 'running'))
+                order.status = 'held';
+            add('maintenance', 'Maintenance · ' + entity.title, { machine: entity.id, reason: text(input, 'reason') });
+            return 'Machine removed from production; active work held.';
+        } },
+    { key: 'repair', label: 'Resolve maintenance', kind: 'maintenance', from: ['open'], roles: [roles[0]!], run: ({ state, entity }) => {
+            entity.status = 'resolved';
+            const machine = find(state.entities, text(entity.fields, 'machine'));
+            if (!linked(state.entities, 'maintenance', 'machine', machine.id).some(row => row.status === 'open')) {
+                machine.status = 'ready';
+                for (const order of linked(state.entities, 'order', 'machine', machine.id).filter(row => row.status === 'held'))
+                    order.status = 'running';
+            }
+            return 'Maintenance resolved; eligible held work resumed.';
+        } },
+];
+const seed = [entity('lot-1', 'lot', 'Aluminium coil A', 'released', { material: 'AL-6061', quantity: 1000 }), entity('machine-1', 'machine', 'Press 04', 'ready', { capacity: 500, line: 'North assembly' }), entity('order-1', 'order', 'Pump housing batch', 'queued', { lot: 'lot-1', machine: 'machine-1', target: 100, materialPerUnit: 2, due: '2026-10-15' })];
+const validate: Product['validate'] = entities => {
+    for (const order of rows(entities, 'order')) {
+        const counts = linked(entities, 'count', 'order', order.id);
+        requireThat(total(counts, 'good') + total(counts, 'scrap') <= number(order.fields, 'target'), 'Production counts exceed target.');
+    }
+};
+const metrics: Product['metrics'] = entities => [{ label: 'Good units', value: String(total(rows(entities, 'count'), 'good')) }, { label: 'Scrap units', value: String(total(rows(entities, 'count'), 'scrap')) }, { label: 'Active orders', value: String(rows(entities, 'order').filter(row => row.status === 'running').length) }];
+export const product: Product = { name: 'ForgeAxis', description: 'Material-backed production and quality release', accent: '#9a3412', actors: roles.map((role, index) => ({ id: 'actor-' + String(index), name: ['Maya Hassan', 'Omar Saleh', 'Lina Farouk', 'Nadia Ali'][index] ?? role, role })), kinds, operations, seed, validate, metrics };
