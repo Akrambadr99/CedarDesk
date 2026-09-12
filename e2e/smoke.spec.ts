@@ -149,3 +149,10 @@ test('factory execution reserves material, records consumption and verifies gene
   await expect(page.getByRole('listitem').filter({ hasText: 'lot-1 → FG-2026-001' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Factory execution history' })).toContainText('genealogy-recorded');
 });
+
+test('current operator certification gates assignment acceptance and quality release',async({page})=>{
+ await page.goto('/operator-control');const role=page.getByLabel('Operator-control role');await page.getByRole('button',{name:'Request press certification'}).click();
+ await role.selectOption('Quality Engineer');await page.getByRole('button',{name:'Activate certification'}).click();await role.selectOption('Supervisor');await page.getByRole('button',{name:'Assign certified operator'}).click();
+ await role.selectOption('Operator');await page.getByRole('button',{name:'Accept work assignment'}).click();await role.selectOption('Quality Engineer');await page.getByRole('button',{name:'Release assigned work'}).click();await page.reload();
+ await expect(page.getByRole('heading',{name:'Work assignment'}).locator('..')).toContainText('released · operator-a');await expect(page.getByRole('region',{name:'Operator control history'})).toContainText('work-released');
+});
