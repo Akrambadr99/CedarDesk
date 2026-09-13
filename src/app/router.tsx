@@ -10,4 +10,5 @@ children.splice(6,0,{path:'calibration-control',lazy:async()=>({Component:(await
 children.splice(7,0,{path:'release-dossier',lazy:async()=>({Component:(await import('../release-dossier/ReleaseDossierPage')).ReleaseDossierPage})});
 children.splice(8,0,{path:'deviation-control',lazy:async()=>({Component:(await import('../deviation-control/DeviationControlPage')).DeviationControlPage})});
 children.splice(9,0,{path:'production-scheduling',lazy:async()=>({Component:(await import('../production-scheduling/ProductionSchedulingPage')).ProductionSchedulingPage})});
+children.splice(10,0,{path:'incoming-quality',lazy:async()=>({Component:(await import('../incoming-quality/IncomingQualityPage')).IncomingQualityPage})});
 export const browserRouter = createBrowserRouter([{ path: '/', Component: AppShell, HydrateFallback: RouteLoading, children }]);
