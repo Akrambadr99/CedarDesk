@@ -13,4 +13,5 @@ children.splice(9,0,{path:'production-scheduling',lazy:async()=>({Component:(awa
 children.splice(10,0,{path:'incoming-quality',lazy:async()=>({Component:(await import('../incoming-quality/IncomingQualityPage')).IncomingQualityPage})});
 children.splice(11,0,{path:'supplier-corrective-action',lazy:async()=>({Component:(await import('../supplier-corrective-action/SupplierCorrectiveActionPage')).SupplierCorrectiveActionPage})});
 children.splice(12,0,{path:'process-change',lazy:async()=>({Component:(await import('../process-change/ProcessChangePage')).ProcessChangePage})});
+children.splice(13,0,{path:'material-control',lazy:async()=>({Component:(await import('../material-control/MaterialControlPage')).MaterialControlPage})});
 export const browserRouter = createBrowserRouter([{ path: '/', Component: AppShell, HydrateFallback: RouteLoading, children }]);
