@@ -7,4 +7,5 @@ children.splice(3,0,{path:'operator-control',lazy:async()=>({Component:(await im
 children.splice(4,0,{path:'maintenance-control',lazy:async()=>({Component:(await import('../maintenance-control/MaintenanceControlPage')).MaintenanceControlPage})});
 children.splice(5,0,{path:'batch-release',lazy:async()=>({Component:(await import('../batch-release/BatchReleasePage')).BatchReleasePage})});
 children.splice(6,0,{path:'calibration-control',lazy:async()=>({Component:(await import('../calibration-control/CalibrationControlPage')).CalibrationControlPage})});
+children.splice(7,0,{path:'release-dossier',lazy:async()=>({Component:(await import('../release-dossier/ReleaseDossierPage')).ReleaseDossierPage})});
 export const browserRouter = createBrowserRouter([{ path: '/', Component: AppShell, HydrateFallback: RouteLoading, children }]);
