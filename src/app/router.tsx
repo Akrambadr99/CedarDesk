@@ -18,4 +18,5 @@ children.splice(14,0,{path:'tooling-control',lazy:async()=>({Component:(await im
 children.splice(15,0,{path:'line-clearance',lazy:async()=>({Component:(await import('../line-clearance/LineClearancePage')).LineClearancePage})});
 children.splice(16,0,{path:'quality-release-queue',lazy:async()=>({Component:(await import('../quality-release-queue/QualityReleaseQueuePage')).QualityReleaseQueuePage})});
 children.splice(17,0,{path:'lot-recall',lazy:async()=>({Component:(await import('../lot-recall/LotRecallPage')).LotRecallPage})});
+children.splice(18,0,{path:'rework-control',lazy:async()=>({Component:(await import('../rework-control/ReworkControlPage')).ReworkControlPage})});
 export const browserRouter = createBrowserRouter([{ path: '/', Component: AppShell, HydrateFallback: RouteLoading, children }]);
