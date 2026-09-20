@@ -9,11 +9,12 @@ export interface RecallState {
   lots: { id: string; version: number; componentBatch: string; available: number; shipped: number; status: 'released' | 'recall-pending' | 'recalled' }[];
   shipments: { id: string; version: number; lotId: string; customerId: string; quantity: number; status: 'delivered' | 'recall-notified' | 'recall-acknowledged' }[];
   workOrders: { id: string; lotId: string; version: number; status: 'scheduled' | 'stopped' }[];
-  recall: null | { id: string; status: 'draft' | 'approved' | 'contained' | 'notified' | 'acknowledged' | 'closed'; initiator: string; approver: string | null; lotIds: string[]; expectedLotVersions: Record<string, number>; expectedShipmentVersions: Record<string, number>; traceFeedVersion: number };
+  recall: null | { id: string; status: 'draft' | 'approved' | 'contained' | 'notified' | 'acknowledged' | 'closed' | 'returns-reconciled'; initiator: string; approver: string | null; lotIds: string[]; expectedLotVersions: Record<string, number>; expectedShipmentVersions: Record<string, number>; traceFeedVersion: number };
   inventory: { available: number; quarantine: number };
   notices: { id: string; customerId: string; shipmentId: string; quantity: number; immutable: true }[];
   acknowledgements: { id: string; shipmentId: string; reference: string; immutable: true }[];
-  evidence: { id: string; kind: 'trace-refresh' | 'assessment' | 'containment' | 'notification' | 'acknowledgement' | 'closure'; immutable: true }[];
+  returns: { id: string; shipmentId: string; quantity: number; custodyReference: string; immutable: true }[];
+  evidence: { id: string; kind: 'trace-refresh' | 'assessment' | 'containment' | 'notification' | 'acknowledgement' | 'closure' | 'return-reconciliation'; immutable: true }[];
   events: { id: string; action: string; actor: string; immutable: true }[];
 }
 export const initialRecallState: RecallState = {
@@ -34,7 +35,7 @@ export const initialRecallState: RecallState = {
   workOrders: [{ id: 'WO-820', lotId: 'LOT-VX-31', version: 3, status: 'scheduled' }, { id: 'WO-821', lotId: 'LOT-VX-32', version: 2, status: 'scheduled' }],
   recall: null,
   inventory: { available: 85, quarantine: 0 },
-  notices: [], acknowledgements: [],
+  notices: [], acknowledgements: [], returns: [],
   evidence: [],
   events: [],
 };
@@ -153,6 +154,7 @@ export function recordRecallAcknowledgements(state: RecallState, command: Meta &
   next.recall.status = 'acknowledged'; next.evidence.push({ id: `${command.id}-acknowledgement`, kind: 'acknowledgement', immutable: true }); return finish(next, command, 'recall-customers-acknowledged');
 }
 export function closeLotRecall(state: RecallState, command: Meta) { assert(command.actor.role === 'Quality Director', 'Only quality directors can close recalls.'); const next = begin(state, command); assert(next.recall?.status === 'acknowledged' && next.acknowledgements.length === next.notices.length, 'Every recall notice requires acknowledgement before closure.'); assert(next.recall.approver === command.actor.id, 'The approving quality director must close the recall.'); next.recall.status = 'closed'; next.evidence.push({ id: `${command.id}-closure`, kind: 'closure', immutable: true }); return finish(next, command, 'lot-recall-closed'); }
+export function reconcileRecalledReturns(state: RecallState, command: Meta & { returns: { shipmentId: string; quantity: number; custodyReference: string }[] }) { assert(command.actor.role === 'Inventory Controller', 'Only inventory controllers can reconcile recalled returns.'); const next = begin(state, command); assert(next.recall?.status === 'closed', 'Closed recall is required before physical return reconciliation.'); const shipments = next.shipments.filter((shipment) => next.recall?.lotIds.includes(shipment.lotId)); assert(command.returns.length === shipments.length, 'Every recalled shipment requires a return record.'); const returned = command.returns.map((item) => { const shipment = shipments.find((candidate) => candidate.id === item.shipmentId); assert(shipment?.quantity === item.quantity, `Returned quantity for ${item.shipmentId} must match the recalled shipment.`); assert(/^CUST-[A-Z0-9-]{8,}$/.test(item.custodyReference), `Valid custody reference for ${item.shipmentId} is required.`); return { id: `${command.id}-${item.shipmentId}`, ...item, immutable: true as const }; }); assert(new Set(returned.map((item) => item.shipmentId)).size === shipments.length, 'Each recalled shipment must be reconciled exactly once.'); next.returns.push(...returned); next.inventory.quarantine += returned.reduce((total, item) => total + item.quantity, 0); next.recall.status = 'returns-reconciled'; next.evidence.push({ id: `${command.id}-returns`, kind: 'return-reconciliation', immutable: true }); return finish(next, command, 'recalled-returns-reconciled'); }
 export class LotRecallRepository {
   static key = 'forgeaxis:lot-recall:v1';
   private storage: Pick<Storage, 'getItem' | 'setItem'>;
