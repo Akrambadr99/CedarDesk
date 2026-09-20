@@ -7,12 +7,13 @@ export interface RecallState {
   filter: LotFilter;
   selectedIds: string[];
   lots: { id: string; version: number; componentBatch: string; available: number; shipped: number; status: 'released' | 'recall-pending' | 'recalled' }[];
-  shipments: { id: string; version: number; lotId: string; customerId: string; quantity: number; status: 'delivered' | 'recall-notified' }[];
+  shipments: { id: string; version: number; lotId: string; customerId: string; quantity: number; status: 'delivered' | 'recall-notified' | 'recall-acknowledged' }[];
   workOrders: { id: string; lotId: string; version: number; status: 'scheduled' | 'stopped' }[];
-  recall: null | { id: string; status: 'draft' | 'approved' | 'contained' | 'notified'; initiator: string; approver: string | null; lotIds: string[]; expectedLotVersions: Record<string, number>; expectedShipmentVersions: Record<string, number>; traceFeedVersion: number };
+  recall: null | { id: string; status: 'draft' | 'approved' | 'contained' | 'notified' | 'acknowledged' | 'closed'; initiator: string; approver: string | null; lotIds: string[]; expectedLotVersions: Record<string, number>; expectedShipmentVersions: Record<string, number>; traceFeedVersion: number };
   inventory: { available: number; quarantine: number };
   notices: { id: string; customerId: string; shipmentId: string; quantity: number; immutable: true }[];
-  evidence: { id: string; kind: 'trace-refresh' | 'assessment' | 'containment' | 'notification'; immutable: true }[];
+  acknowledgements: { id: string; shipmentId: string; reference: string; immutable: true }[];
+  evidence: { id: string; kind: 'trace-refresh' | 'assessment' | 'containment' | 'notification' | 'acknowledgement' | 'closure'; immutable: true }[];
   events: { id: string; action: string; actor: string; immutable: true }[];
 }
 export const initialRecallState: RecallState = {
@@ -33,7 +34,7 @@ export const initialRecallState: RecallState = {
   workOrders: [{ id: 'WO-820', lotId: 'LOT-VX-31', version: 3, status: 'scheduled' }, { id: 'WO-821', lotId: 'LOT-VX-32', version: 2, status: 'scheduled' }],
   recall: null,
   inventory: { available: 85, quarantine: 0 },
-  notices: [],
+  notices: [], acknowledgements: [],
   evidence: [],
   events: [],
 };
@@ -144,6 +145,14 @@ export function notifyRecallCustomers(state: RecallState, command: Meta) {
   next.evidence.push({ id: `${command.id}-notification`, kind: 'notification', immutable: true });
   return finish(next, command, 'recall-customers-notified');
 }
+export function recordRecallAcknowledgements(state: RecallState, command: Meta & { references: Record<string, string> }) {
+  assert(command.actor.role === 'Customer Safety Officer', 'Only customer safety officers can record acknowledgements.');
+  const next = begin(state, command); assert(next.recall?.status === 'notified', 'Notified recall is required.');
+  const shipments = next.shipments.filter((shipment) => next.recall?.lotIds.includes(shipment.lotId));
+  for (const shipment of shipments) { const reference = command.references[shipment.id]?.trim(); assert(reference && reference.length >= 8, `Customer acknowledgement for ${shipment.id} is required.`); assert(shipment.status === 'recall-notified', `Shipment ${shipment.id} is not awaiting acknowledgement.`); shipment.status = 'recall-acknowledged'; shipment.version += 1; next.acknowledgements.push({ id: `${command.id}-${shipment.id}`, shipmentId: shipment.id, reference, immutable: true }); }
+  next.recall.status = 'acknowledged'; next.evidence.push({ id: `${command.id}-acknowledgement`, kind: 'acknowledgement', immutable: true }); return finish(next, command, 'recall-customers-acknowledged');
+}
+export function closeLotRecall(state: RecallState, command: Meta) { assert(command.actor.role === 'Quality Director', 'Only quality directors can close recalls.'); const next = begin(state, command); assert(next.recall?.status === 'acknowledged' && next.acknowledgements.length === next.notices.length, 'Every recall notice requires acknowledgement before closure.'); assert(next.recall.approver === command.actor.id, 'The approving quality director must close the recall.'); next.recall.status = 'closed'; next.evidence.push({ id: `${command.id}-closure`, kind: 'closure', immutable: true }); return finish(next, command, 'lot-recall-closed'); }
 export class LotRecallRepository {
   static key = 'forgeaxis:lot-recall:v1';
   private storage: Pick<Storage, 'getItem' | 'setItem'>;
