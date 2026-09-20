@@ -187,3 +187,6 @@ test('cancels reserved rework and restores resources before a safe resume',async
 
 
 test('shows concurrent recall recovery priority',async({page})=>{await page.goto('/lot-recall');const workload=page.getByRole('region',{name:'Recall workload'});await expect(workload).toContainText('RECALL-SEAL-B88 · critical');await expect(workload).toContainText('45 units outstanding');});
+
+
+test('quality director reassigns a critical recall with persisted review custody',async({page})=>{await page.goto('/lot-recall');await page.getByLabel('Recall portfolio authority').selectOption('Quality Director');await page.getByRole('button',{name:'Reassign critical recall'}).click();await expect(page.getByRole('status')).toContainText('effectiveness review scheduled');await expect(page.getByRole('region',{name:'Recall workload'})).toContainText('Senior recall cell');await page.reload();await expect(page.getByRole('list',{name:'Recall assignment history'})).toContainText('population 45');});
