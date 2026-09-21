@@ -94,6 +94,42 @@ export function getRecallRecoveryTimeline(state: RecallPortfolioState, recallId:
   }
 }
 
+export interface RecallRecoveryFilter {
+  recallId?: string
+  customerId?: string
+  outcome?: RecallNotificationAttempt['outcome']
+  acknowledgement?: 'acknowledged' | 'outstanding'
+  physicalState?: 'undisposed' | 'disposed'
+  effectiveness?: 'open' | RecallClosure['determination']
+  query?: string
+}
+
+export function browseRecallRecovery(state: RecallPortfolioState, filter: RecallRecoveryFilter = {}) {
+  const needle = filter.query?.trim().toLocaleLowerCase()
+  return state.recalls.filter((recall) => {
+    const attempts = state.notificationAttempts.filter((item) => item.recallId === recall.recallId)
+    const acknowledgements = state.acknowledgements.filter((item) => item.recallId === recall.recallId)
+    const dispositions = state.unitDispositions.filter((item) => item.recallId === recall.recallId)
+    const decisions = state.closures.filter((item) => item.recallId === recall.recallId)
+    const customerAttempts = filter.customerId ? attempts.filter((item) => item.customerId === filter.customerId) : attempts
+    if (filter.recallId && recall.recallId !== filter.recallId) return false
+    if (filter.customerId && customerAttempts.length === 0) return false
+    if (filter.outcome && !customerAttempts.some((item) => item.outcome === filter.outcome)) return false
+    if (filter.acknowledgement === 'acknowledged' && acknowledgements.length === 0) return false
+    if (filter.acknowledgement === 'outstanding' && acknowledgements.length >= recall.customerCount) return false
+    if (filter.physicalState === 'disposed' && dispositions.length === 0) return false
+    if (filter.physicalState === 'undisposed' && dispositions.length > 0) return false
+    if (filter.effectiveness === 'open' && decisions.length > 0) return false
+    if (filter.effectiveness && filter.effectiveness !== 'open' && !decisions.some((item) => item.determination === filter.effectiveness)) return false
+    if (needle && ![recall.recallId, recall.owner, recall.genealogyReference, ...attempts.flatMap((item) => [item.customerId, item.failureReason ?? '']), ...dispositions.map((item) => item.genealogyEvidence)].some((value) => value.toLocaleLowerCase().includes(needle))) return false
+    return true
+  }).map((recall) => {
+    const timeline = getRecallRecoveryTimeline(state, recall.recallId, filter.customerId)
+    const retryLineage = timeline.attempts.map((attempt) => ({ attemptId: attempt.id, retryOf: attempt.retryOf, recoveredBy: state.notificationAttempts.find((item) => item.retryOf === attempt.id)?.id ?? null }))
+    return { recall, ...timeline, retryLineage, outstandingAcknowledgements: Math.max(0, recall.customerCount - state.acknowledgements.filter((item) => item.recallId === recall.recallId).length) }
+  })
+}
+
 export interface RecallAttemptPersistence { load(): RecallPortfolioState | null; save(state: RecallPortfolioState): void }
 export class BrowserRecallAttemptPersistence implements RecallAttemptPersistence {
   static key = 'forgeaxis:recall-portfolio:v2'
