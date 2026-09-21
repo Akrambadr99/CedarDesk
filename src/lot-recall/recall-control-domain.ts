@@ -138,6 +138,14 @@ export function browseRecallRecovery(state: RecallPortfolioState, filter: Recall
   })
 }
 
+export function getRecallOperationalDrillDown(state: RecallPortfolioState, recallId: string, customerId?: string) {
+  const recall = state.recalls.find((item) => item.recallId === recallId)
+  if (!recall) return null
+  const timeline = getRecallRecoveryTimeline(state, recallId, customerId)
+  const shipments = timeline.attempts.map((attempt) => ({ shipmentReference: attempt.shipmentReference, customerId: attempt.customerId, lotReference: attempt.lotReference, unitReferences: [...attempt.unitReferences], notificationOutcome: attempt.outcome, acknowledged: timeline.acknowledgements.some((item) => item.customerId === attempt.customerId), recoveredBy: state.notificationAttempts.find((item) => item.retryOf === attempt.id && item.outcome === 'acknowledged')?.id ?? null }))
+  return { recallId, authoritativeGenealogy: recall.genealogyReference, owner: recall.owner, shipments, physicalRecovery: { recoveredUnits: recall.recoveredUnits, tracedUnits: recall.tracedUnits, dispositions: timeline.dispositions }, effectivenessDecision: timeline.decisions.at(-1) ?? null }
+}
+
 export interface RecallAttemptPersistence { load(): RecallPortfolioState | null; save(state: RecallPortfolioState): void }
 export class BrowserRecallAttemptPersistence implements RecallAttemptPersistence {
   static key = 'forgeaxis:recall-portfolio:v2'

@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { rankRecallWorkload } from "./recall-portfolio";
 import {
   browseRecallRecovery,
+  getRecallOperationalDrillDown,
   BrowserRecallAttemptPersistence,
   RecallPortfolioRepository,
   type RecallAuthority,
@@ -21,6 +22,7 @@ export function RecallWorkloadControl() {
   const [recoveryFilter, setRecoveryFilter] = useState<
     "all" | "outstanding" | "failed"
   >("all");
+  const [selectedRecall, setSelectedRecall] = useState("RECALL-SEAL-B88");
   const feedback = useRef<HTMLParagraphElement>(null);
   const workload = rankRecallWorkload(state.recalls, "2026-10-20");
   const recovery = browseRecallRecovery(
@@ -31,6 +33,7 @@ export function RecallWorkloadControl() {
         ? { acknowledgement: "outstanding" }
         : {},
   );
+  const drillDown = getRecallOperationalDrillDown(state, selectedRecall);
   const reassign = () => {
     try {
       setState(
@@ -155,8 +158,9 @@ export function RecallWorkloadControl() {
         </select>
       </label>
       <ol aria-label="Filtered recall recovery">
-        {recovery.map((item) => <li key={item.recall.recallId}>{item.recall.recallId} · {item.outstandingAcknowledgements} acknowledgements outstanding · {item.attempts.length} attempts · {item.dispositions.length ? "physical disposition recorded" : "physical disposition outstanding"}</li>)}
+        {recovery.map((item) => <li key={item.recall.recallId}><button aria-pressed={selectedRecall === item.recall.recallId} onClick={() => { setSelectedRecall(item.recall.recallId); }}>{item.recall.recallId}</button> · {item.outstandingAcknowledgements} acknowledgements outstanding · {item.attempts.length} attempts · {item.dispositions.length ? "physical disposition recorded" : "physical disposition outstanding"}</li>)}
       </ol>
+      {drillDown && <section aria-label="Recall operational drill-down"><h3>{drillDown.recallId} operational lineage</h3><p>Genealogy {drillDown.authoritativeGenealogy} · owner {drillDown.owner}</p><p>Recovery {drillDown.physicalRecovery.recoveredUnits} of {drillDown.physicalRecovery.tracedUnits} units · effectiveness {drillDown.effectivenessDecision?.determination ?? "open"}</p><ol>{drillDown.shipments.map((item) => <li key={`${item.shipmentReference}:${item.customerId}`}>{item.shipmentReference} · customer {item.customerId} · lot {item.lotReference} · units {item.unitReferences.join(", ") || "not serialized"} · {item.notificationOutcome} · {item.acknowledged ? "acknowledged" : "awaiting acknowledgement"}</li>)}</ol></section>}
       <button
         disabled={
           authority !== "Quality Director" || state.assignmentHistory.length > 0
