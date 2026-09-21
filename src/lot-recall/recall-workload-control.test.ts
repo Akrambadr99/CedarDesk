@@ -1,8 +1,26 @@
 import { describe, expect, it } from 'vitest'
-import { browseRecallRecovery, determineRecallEffectiveness, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, initialRecallPortfolioState, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification } from './recall-control-domain'
+import { browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource } from './recall-control-domain'
 import { initialFactoryExecution } from '../factory/execution-control'
 
 it('resolves recalled lot only through matching consumed allocation and verified factory genealogy', () => { const missing = getRecallProductionLink(initialRecallPortfolioState, initialFactoryExecution, 'RECALL-SEAL-B88'); expect(missing).toMatchObject({ status: 'missing', orderId: null }); const execution = structuredClone(initialFactoryExecution); execution.revision = 3; execution.genealogy.push({ id: 'genealogy-1', orderId: 'order-1', inputLotId: 'lot-1', outputLotId: 'SEAL-B88', quantity: 100, verifiedBy: 'quality-a', at: '2026-10-20' }); expect(getRecallProductionLink(initialRecallPortfolioState, execution, 'RECALL-SEAL-B88')?.status).toBe('incomplete'); execution.allocations.push({ id: 'allocation-1', orderId: 'order-1', lotId: 'lot-1', kilograms: 200, requestedBy: 'supervisor-a', status: 'consumed', revision: 2 }); expect(getRecallProductionLink(initialRecallPortfolioState, execution, 'RECALL-SEAL-B88')).toMatchObject({ status: 'verified', orderId: 'order-1', inputLotId: 'lot-1', genealogyId: 'genealogy-1', sourceRevision: 3 }); execution.genealogy.push({ ...execution.genealogy[0]!, id: 'genealogy-2', orderId: 'order-2' }); expect(getRecallProductionLink(initialRecallPortfolioState, execution, 'RECALL-SEAL-B88')?.status).toBe('conflicting') })
+
+it('attests split shipment lines and reconciles partial returned units without inventing missing links', () => {
+  const source = { id: 'line-1', expectedRevision: 0, authority: 'Quality Analyst' as const, recallId: 'RECALL-SEAL-B88', shipmentReference: 'SHIP-77', lineReference: 'LINE-1', customerId: 'CUSTOMER-1', lotReference: 'SEAL-B88', affectedUnits: 20, sourceDocument: 'DESPATCH-MANIFEST-77', recordedBy: 'analyst' }
+  expect(getRecallShipmentRecovery(initialRecallPortfolioState, source.recallId)).toEqual([])
+  expect(() => recordRecallShipmentSource(initialRecallPortfolioState, { ...source, lotReference: 'UNKNOWN' })).toThrow('affected recall lot')
+  const first = recordRecallShipmentSource(initialRecallPortfolioState, source)
+  const second = recordRecallShipmentSource(first, { ...source, id: 'line-2', expectedRevision: first.revision, lineReference: 'LINE-2', customerId: 'CUSTOMER-2', affectedUnits: 25 })
+  expect(() => recordRecallShipmentSource(second, { ...source, id: 'extra', expectedRevision: second.revision, lineReference: 'LINE-3', affectedUnits: 1 })).toThrow('exceeds the traced')
+  const receipt = { id: 'return-1', expectedRevision: second.revision, authority: 'Quality Director' as const, shipmentSourceId: 'line-1', returnedUnits: 8, custodyReference: 'CUSTODY-77-A', receivedBy: 'recovery desk', receivedOn: '2026-10-23' }
+  expect(() => recordRecallShipmentReturn(second, { ...receipt, authority: 'Quality Analyst' })).toThrow('quality director')
+  const partial = recordRecallShipmentReturn(second, receipt)
+  expect(partial.recalls.find((item) => item.recallId === source.recallId)?.recoveredUnits).toBe(8)
+  expect(getRecallShipmentRecovery(partial, source.recallId)).toMatchObject([{ status: 'partially recovered', returnedUnits: 8, outstandingUnits: 12 }, { status: 'awaiting recovery', outstandingUnits: 25 }])
+  expect(() => recordRecallShipmentReturn(partial, { ...receipt, id: 'over-return', expectedRevision: partial.revision, returnedUnits: 13 })).toThrow('valid remaining units')
+  expect(recordRecallShipmentReturn(partial, receipt)).toBe(partial)
+  const old = { ...partial } as Record<string, unknown>; delete old['shipmentSources']; delete old['shipmentReturns']
+  expect(new BrowserRecallAttemptPersistence({ getItem: () => JSON.stringify(old), setItem: () => undefined }).load()).toMatchObject({ shipmentSources: [], shipmentReturns: [] })
+})
 
 const command = { id: 'assign-1', expectedRevision: 0, authority: 'Quality Director' as const, recallId: 'RECALL-SEAL-B88', toOwner: 'Senior recall cell', reviewOn: '2026-10-23', asOf: '2026-10-20', reason: 'Low recovery coverage requires dedicated senior recall ownership.' }
 function recallReadyForDetermination() {
