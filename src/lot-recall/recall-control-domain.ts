@@ -11,9 +11,10 @@ export function reconcileRecallDisposition(tracedUnits: number, repairedUnits: n
 }
 export interface RecallAssignmentEvent { id: string; recallId: string; fromOwner: string; toOwner: string; reviewOn: string; reason: string; tracedPopulation: number; immutable: true }
 export interface RecallClosure { id: string; recallId: string; assignmentId: string; customerAcknowledgements: number; repairedUnits: number; scrappedUnits: number; releasedUnits: number; genealogyEvidence: string; determination: 'effective' | 'unsuccessful'; decidedBy: string; decidedOn: string; immutable: true }
-export interface RecallPortfolioState { revision: number; recalls: RecallWorkload[]; assignmentHistory: RecallAssignmentEvent[]; closures: RecallClosure[] }
+export interface RecallNotificationAttempt { id: string; recallId: string; customerId: string; recallRevision: number; action: 'recall-notification'; outcome: 'failed' | 'acknowledged'; failureReason: string | null; actor: string; attemptedOn: string; retryOf: string | null; immutable: true }
+export interface RecallPortfolioState { revision: number; recalls: RecallWorkload[]; assignmentHistory: RecallAssignmentEvent[]; notificationAttempts: RecallNotificationAttempt[]; closures: RecallClosure[] }
 export const recallCapacityPolicy = { maximumActiveRecalls: 2 } as const
-export const initialRecallPortfolioState: RecallPortfolioState = { revision: 0, recalls: structuredClone(seededRecallWorkload), assignmentHistory: [], closures: [] }
+export const initialRecallPortfolioState: RecallPortfolioState = { revision: 0, recalls: structuredClone(seededRecallWorkload), assignmentHistory: [], notificationAttempts: [], closures: [] }
 
 interface ReassignRecallCommand { id: string; expectedRevision: number; authority: RecallAuthority; recallId: string; toOwner: string; reviewOn: string; asOf: string; reason: string }
 
@@ -37,6 +38,24 @@ export function reassignCriticalRecall(state: RecallPortfolioState, command: Rea
   return next
 }
 
+interface RecordRecallNotification { id: string; expectedRevision: number; authority: RecallAuthority; recallId: string; customerId: string; outcome: 'failed' | 'acknowledged'; failureReason: string | null; actor: string; attemptedOn: string; retryOf: string | null }
+export function recordRecallNotification(state: RecallPortfolioState, command: RecordRecallNotification) {
+  if (state.notificationAttempts.some((item) => item.id === command.id)) return state
+  if (state.revision !== command.expectedRevision) throw new RecallControlError('STALE_REVISION', 'Recall changed before customer notification.')
+  if (command.authority !== 'Quality Director') throw new RecallControlError('UNAUTHORIZED', 'Only the quality director can record consequential recall notification.')
+  if (!state.recalls.some((item) => item.recallId === command.recallId)) throw new Error('Recall was not found.')
+  if (state.notificationAttempts.some((item) => item.recallId === command.recallId && item.customerId === command.customerId && item.outcome === 'acknowledged')) throw new Error('Customer already acknowledged this recall.')
+  if (command.retryOf) {
+    const previous = state.notificationAttempts.find((item) => item.id === command.retryOf)
+    if (previous?.outcome !== 'failed' || previous.recallId !== command.recallId || previous.customerId !== command.customerId) throw new Error('Retry must reference a failed attempt for the same customer and recall.')
+  }
+  if (command.outcome === 'failed' && !command.failureReason) throw new Error('Failed notification requires a failure reason.')
+  const next = structuredClone(state)
+  next.notificationAttempts.push({ id: command.id, recallId: command.recallId, customerId: command.customerId, recallRevision: state.revision, action: 'recall-notification', outcome: command.outcome, failureReason: command.failureReason, actor: command.actor, attemptedOn: command.attemptedOn, retryOf: command.retryOf, immutable: true })
+  next.revision += 1
+  return next
+}
+
 interface DetermineRecallEffectiveness { id: string; expectedRevision: number; authority: RecallAuthority; recallId: string; customerAcknowledgements: number; repairedUnits: number; scrappedUnits: number; releasedUnits: number; genealogyEvidence: string; determination: 'effective' | 'unsuccessful'; decidedBy: string; decidedOn: string }
 export function determineRecallEffectiveness(state: RecallPortfolioState, command: DetermineRecallEffectiveness) {
   if (state.closures.some((item) => item.id === command.id)) return state
@@ -45,6 +64,9 @@ export function determineRecallEffectiveness(state: RecallPortfolioState, comman
   const recall = state.recalls.find((item) => item.recallId === command.recallId)
   const assignment = [...state.assignmentHistory].reverse().find((item) => item.recallId === command.recallId)
   if (!recall || !assignment) throw new Error('A governed recall assignment is required before determination.')
+  const acknowledgedCustomers = new Set(state.notificationAttempts.filter((item) => item.recallId === command.recallId && item.outcome === 'acknowledged').map((item) => item.customerId))
+  if (acknowledgedCustomers.size !== recall.customerCount) throw new Error('Every affected customer must have a durable acknowledgement before closure.')
+  if (command.customerAcknowledgements !== acknowledgedCustomers.size) throw new RecallControlError('DISPOSITION_MISMATCH', 'The reported acknowledgement count must match the durable customer history.')
   const reconciliation = reconcileRecallDisposition(recall.tracedUnits, command.repairedUnits, command.scrappedUnits, command.releasedUnits)
   if (command.customerAcknowledgements !== recall.customerCount || !reconciliation.balanced || !command.genealogyEvidence.trim()) throw new RecallControlError('DISPOSITION_MISMATCH', 'Customer, population, disposition, and genealogy evidence must fully reconcile.')
   if (command.determination !== 'effective') throw new Error('An unsuccessful recall requires additional recovery action and cannot close.')
@@ -64,5 +86,5 @@ export class RecallPortfolioRepository {
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
   read(): RecallPortfolioState { const raw = this.storage.getItem(RecallPortfolioRepository.key); return raw ? JSON.parse(raw) as RecallPortfolioState : structuredClone(initialRecallPortfolioState) }
-  dispatch(command: ReassignRecallCommand | DetermineRecallEffectiveness) { const current = this.read(); const next = 'determination' in command ? determineRecallEffectiveness(current, command) : reassignCriticalRecall(current, command); if (next !== current) this.storage.setItem(RecallPortfolioRepository.key, JSON.stringify(next)); return next }
+  dispatch(command: ReassignRecallCommand | RecordRecallNotification | DetermineRecallEffectiveness) { const current = this.read(); const next = 'customerId' in command ? recordRecallNotification(current, command) : 'determination' in command ? determineRecallEffectiveness(current, command) : reassignCriticalRecall(current, command); if (next !== current) this.storage.setItem(RecallPortfolioRepository.key, JSON.stringify(next)); return next }
 }
