@@ -11,7 +11,7 @@ export function reconcileRecallDisposition(tracedUnits: number, repairedUnits: n
 }
 export interface RecallAssignmentEvent { id: string; recallId: string; fromOwner: string; toOwner: string; reviewOn: string; reason: string; tracedPopulation: number; immutable: true }
 export interface RecallClosure { id: string; recallId: string; assignmentId: string; customerAcknowledgements: number; repairedUnits: number; scrappedUnits: number; releasedUnits: number; genealogyEvidence: string; determination: 'effective' | 'unsuccessful'; decidedBy: string; decidedOn: string; immutable: true }
-export interface RecallNotificationAttempt { id: string; recallId: string; customerId: string; recallRevision: number; action: 'recall-notification'; outcome: 'failed' | 'acknowledged'; failureReason: string | null; actor: string; attemptedOn: string; retryOf: string | null; immutable: true }
+export interface RecallNotificationAttempt { id: string; recallId: string; customerId: string; shipmentReference: string; lotReference: string; unitReferences: string[]; recallRevision: number; action: 'recall-notification'; outcome: 'failed' | 'acknowledged'; failureReason: string | null; actor: string; attemptedOn: string; retryOf: string | null; immutable: true }
 export interface RecallCustomerAcknowledgement { id: string; recallId: string; customerId: string; notificationAttemptId: string; acknowledgedBy: string; acknowledgedOn: string; recallRevision: number; immutable: true }
 export interface RecallUnitDisposition { id: string; recallId: string; repairedUnits: number; scrappedUnits: number; releasedUnits: number; genealogyEvidence: string; decidedOn: string; effectivenessDecisionId: string; immutable: true }
 export interface RecallPortfolioState { revision: number; recalls: RecallWorkload[]; assignmentHistory: RecallAssignmentEvent[]; notificationAttempts: RecallNotificationAttempt[]; acknowledgements: RecallCustomerAcknowledgement[]; unitDispositions: RecallUnitDisposition[]; closures: RecallClosure[] }
@@ -40,12 +40,13 @@ export function reassignCriticalRecall(state: RecallPortfolioState, command: Rea
   return next
 }
 
-interface RecordRecallNotification { id: string; expectedRevision: number; authority: RecallAuthority; recallId: string; customerId: string; outcome: 'failed' | 'acknowledged'; failureReason: string | null; actor: string; attemptedOn: string; retryOf: string | null }
+interface RecordRecallNotification { id: string; expectedRevision: number; authority: RecallAuthority; recallId: string; customerId: string; shipmentReference?: string; lotReference?: string; unitReferences?: string[]; outcome: 'failed' | 'acknowledged'; failureReason: string | null; actor: string; attemptedOn: string; retryOf: string | null }
 export function recordRecallNotification(state: RecallPortfolioState, command: RecordRecallNotification) {
   if (state.notificationAttempts.some((item) => item.id === command.id)) return state
   if (state.revision !== command.expectedRevision) throw new RecallControlError('STALE_REVISION', 'Recall changed before customer notification.')
   if (command.authority !== 'Quality Director') throw new RecallControlError('UNAUTHORIZED', 'Only the quality director can record consequential recall notification.')
-  if (!state.recalls.some((item) => item.recallId === command.recallId)) throw new Error('Recall was not found.')
+  const recall = state.recalls.find((item) => item.recallId === command.recallId)
+  if (!recall) throw new Error('Recall was not found.')
   if (state.notificationAttempts.some((item) => item.recallId === command.recallId && item.customerId === command.customerId && item.outcome === 'acknowledged')) throw new Error('Customer already acknowledged this recall.')
   if (command.retryOf) {
     const previous = state.notificationAttempts.find((item) => item.id === command.retryOf)
@@ -53,7 +54,7 @@ export function recordRecallNotification(state: RecallPortfolioState, command: R
   }
   if (command.outcome === 'failed' && !command.failureReason) throw new Error('Failed notification requires a failure reason.')
   const next = structuredClone(state)
-  next.notificationAttempts.push({ id: command.id, recallId: command.recallId, customerId: command.customerId, recallRevision: state.revision, action: 'recall-notification', outcome: command.outcome, failureReason: command.failureReason, actor: command.actor, attemptedOn: command.attemptedOn, retryOf: command.retryOf, immutable: true })
+  next.notificationAttempts.push({ id: command.id, recallId: command.recallId, customerId: command.customerId, shipmentReference: command.shipmentReference ?? `SHIPMENT-${command.customerId}`, lotReference: command.lotReference ?? recall.genealogyReference, unitReferences: [...(command.unitReferences ?? [])], recallRevision: state.revision, action: 'recall-notification', outcome: command.outcome, failureReason: command.failureReason, actor: command.actor, attemptedOn: command.attemptedOn, retryOf: command.retryOf, immutable: true })
   if (command.outcome === 'acknowledged') next.acknowledgements.push({ id: `${command.id}:ack`, recallId: command.recallId, customerId: command.customerId, notificationAttemptId: command.id, acknowledgedBy: command.actor, acknowledgedOn: command.attemptedOn, recallRevision: state.revision, immutable: true })
   next.revision += 1
   return next
@@ -101,11 +102,13 @@ export interface RecallRecoveryFilter {
   acknowledgement?: 'acknowledged' | 'outstanding'
   physicalState?: 'undisposed' | 'disposed'
   effectiveness?: 'open' | RecallClosure['determination']
-  query?: string
+  shipmentReference?: string
+  lotReference?: string
+  unitReference?: string
+  retryState?: 'unrecovered-failure' | 'recovered-failure'
 }
 
 export function browseRecallRecovery(state: RecallPortfolioState, filter: RecallRecoveryFilter = {}) {
-  const needle = filter.query?.trim().toLocaleLowerCase()
   return state.recalls.filter((recall) => {
     const attempts = state.notificationAttempts.filter((item) => item.recallId === recall.recallId)
     const acknowledgements = state.acknowledgements.filter((item) => item.recallId === recall.recallId)
@@ -115,13 +118,18 @@ export function browseRecallRecovery(state: RecallPortfolioState, filter: Recall
     if (filter.recallId && recall.recallId !== filter.recallId) return false
     if (filter.customerId && customerAttempts.length === 0) return false
     if (filter.outcome && !customerAttempts.some((item) => item.outcome === filter.outcome)) return false
+    if (filter.shipmentReference && !customerAttempts.some((item) => item.shipmentReference === filter.shipmentReference)) return false
+    if (filter.lotReference && recall.genealogyReference !== filter.lotReference && !customerAttempts.some((item) => item.lotReference === filter.lotReference)) return false
+    const unitReference = filter.unitReference
+    if (unitReference && !customerAttempts.some((item) => item.unitReferences.includes(unitReference))) return false
+    if (filter.retryState === 'unrecovered-failure' && !customerAttempts.some((item) => item.outcome === 'failed' && !state.notificationAttempts.some((retry) => retry.retryOf === item.id && retry.outcome === 'acknowledged'))) return false
+    if (filter.retryState === 'recovered-failure' && !customerAttempts.some((item) => item.outcome === 'failed' && state.notificationAttempts.some((retry) => retry.retryOf === item.id && retry.outcome === 'acknowledged'))) return false
     if (filter.acknowledgement === 'acknowledged' && acknowledgements.length === 0) return false
     if (filter.acknowledgement === 'outstanding' && acknowledgements.length >= recall.customerCount) return false
     if (filter.physicalState === 'disposed' && dispositions.length === 0) return false
     if (filter.physicalState === 'undisposed' && dispositions.length > 0) return false
     if (filter.effectiveness === 'open' && decisions.length > 0) return false
     if (filter.effectiveness && filter.effectiveness !== 'open' && !decisions.some((item) => item.determination === filter.effectiveness)) return false
-    if (needle && ![recall.recallId, recall.owner, recall.genealogyReference, ...attempts.flatMap((item) => [item.customerId, item.failureReason ?? '']), ...dispositions.map((item) => item.genealogyEvidence)].some((value) => value.toLocaleLowerCase().includes(needle))) return false
     return true
   }).map((recall) => {
     const timeline = getRecallRecoveryTimeline(state, recall.recallId, filter.customerId)
@@ -135,7 +143,7 @@ export class BrowserRecallAttemptPersistence implements RecallAttemptPersistence
   static key = 'forgeaxis:recall-portfolio:v2'
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
-  load() { const raw = this.storage.getItem(BrowserRecallAttemptPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<RecallPortfolioState>; const attempts = saved.notificationAttempts ?? []; return { ...(saved as RecallPortfolioState), notificationAttempts: attempts, acknowledgements: saved.acknowledgements ?? attempts.filter((item) => item.outcome === 'acknowledged').map((item) => ({ id: `${item.id}:ack`, recallId: item.recallId, customerId: item.customerId, notificationAttemptId: item.id, acknowledgedBy: item.actor, acknowledgedOn: item.attemptedOn, recallRevision: item.recallRevision, immutable: true })), unitDispositions: saved.unitDispositions ?? [] } }
+  load() { const raw = this.storage.getItem(BrowserRecallAttemptPersistence.key); if (!raw) return null; type SavedAttempt = Omit<RecallNotificationAttempt, 'shipmentReference' | 'lotReference' | 'unitReferences'> & { shipmentReference?: string; lotReference?: string; unitReferences?: string[] }; const saved = JSON.parse(raw) as Omit<Partial<RecallPortfolioState>, 'notificationAttempts'> & { notificationAttempts?: SavedAttempt[] }; const attempts = (saved.notificationAttempts ?? []).map((item) => ({ ...item, shipmentReference: item.shipmentReference ?? `SHIPMENT-${item.customerId}`, lotReference: item.lotReference ?? saved.recalls?.find((recall) => recall.recallId === item.recallId)?.genealogyReference ?? item.recallId, unitReferences: item.unitReferences ?? [] })); return { ...(saved as RecallPortfolioState), notificationAttempts: attempts, acknowledgements: saved.acknowledgements ?? attempts.filter((item) => item.outcome === 'acknowledged').map((item) => ({ id: `${item.id}:ack`, recallId: item.recallId, customerId: item.customerId, notificationAttemptId: item.id, acknowledgedBy: item.actor, acknowledgedOn: item.attemptedOn, recallRevision: item.recallRevision, immutable: true })), unitDispositions: saved.unitDispositions ?? [] } }
   save(state: RecallPortfolioState) { this.storage.setItem(BrowserRecallAttemptPersistence.key, JSON.stringify(state)) }
 }
 export class RecallPortfolioRepository {

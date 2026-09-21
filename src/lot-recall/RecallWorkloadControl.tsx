@@ -26,7 +26,7 @@ export function RecallWorkloadControl() {
   const recovery = browseRecallRecovery(
     state,
     recoveryFilter === "failed"
-      ? { outcome: "failed" }
+      ? { retryState: "unrecovered-failure" }
       : recoveryFilter === "outstanding"
         ? { acknowledgement: "outstanding" }
         : {},
