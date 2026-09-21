@@ -151,6 +151,7 @@ test('factory execution reserves material, records consumption and verifies gene
   await expect(page.getByRole('listitem').filter({ hasText: 'lot-1 → FG-2026-001' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Factory execution history' })).toContainText('genealogy-recorded');
 });
+test('recall drill-down links only to factory-verified matching production genealogy',async({page})=>{await page.goto('/lot-recall');await expect(page.getByLabel('Production source linkage')).toContainText('Production source missing');await page.goto('/factory-execution');const role=page.getByLabel('Execution role');await page.getByRole('button',{name:'Reserve for work order'}).click();await role.selectOption('Operator');await page.getByRole('button',{name:'Accept staged material'}).click();await page.getByRole('button',{name:'Record consumption'}).click();await role.selectOption('Quality Engineer');await page.getByLabel('Verified output lot').fill('SEAL-B88');await page.getByRole('button',{name:'Verify output genealogy'}).click();await page.goto('/lot-recall');await expect(page.getByLabel('Production source linkage')).toContainText('Production source verified');await expect(page.getByLabel('Production source linkage')).toContainText('order order-1');});
 
 test('current operator certification gates assignment acceptance and quality release',async({page})=>{
  await page.goto('/operator-control');const role=page.getByLabel('Operator-control role');await page.getByRole('button',{name:'Request press certification'}).click();

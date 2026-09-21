@@ -1,4 +1,5 @@
 import { rankRecallWorkload, seededRecallWorkload, type RecallWorkload } from './recall-portfolio'
+import type { FactoryExecutionState } from '../factory/execution-control'
 
 export type RecallAuthority = 'Quality Analyst' | 'Quality Director'
 export class RecallControlError extends Error {
@@ -144,6 +145,18 @@ export function getRecallOperationalDrillDown(state: RecallPortfolioState, recal
   const timeline = getRecallRecoveryTimeline(state, recallId, customerId)
   const shipments = timeline.attempts.map((attempt) => ({ shipmentReference: attempt.shipmentReference, customerId: attempt.customerId, lotReference: attempt.lotReference, unitReferences: [...attempt.unitReferences], notificationOutcome: attempt.outcome, acknowledged: timeline.acknowledgements.some((item) => item.customerId === attempt.customerId), recoveredBy: state.notificationAttempts.find((item) => item.retryOf === attempt.id && item.outcome === 'acknowledged')?.id ?? null }))
   return { recallId, authoritativeGenealogy: recall.genealogyReference, owner: recall.owner, shipments, physicalRecovery: { recoveredUnits: recall.recoveredUnits, tracedUnits: recall.tracedUnits, dispositions: timeline.dispositions }, effectivenessDecision: timeline.decisions.at(-1) ?? null }
+}
+
+export function getRecallProductionLink(state: RecallPortfolioState, execution: FactoryExecutionState, recallId: string) {
+  const recall = state.recalls.find((item) => item.recallId === recallId)
+  if (!recall) return null
+  const matches = execution.genealogy.filter((item) => item.outputLotId === recall.genealogyReference)
+  if (matches.length !== 1) return { status: matches.length === 0 ? 'missing' as const : 'conflicting' as const, lotReference: recall.genealogyReference, sourceRevision: execution.revision, orderId: null }
+  const genealogy = matches[0]
+  if (!genealogy) throw new Error('Matched factory genealogy disappeared during recall linkage.')
+  const allocation = execution.allocations.find((item) => item.orderId === genealogy.orderId && item.lotId === genealogy.inputLotId && item.status === 'consumed')
+  if (!allocation) return { status: 'incomplete' as const, lotReference: recall.genealogyReference, sourceRevision: execution.revision, orderId: null }
+  return { status: 'verified' as const, lotReference: genealogy.outputLotId, sourceRevision: execution.revision, orderId: genealogy.orderId, inputLotId: genealogy.inputLotId, genealogyId: genealogy.id, allocationId: allocation.id, producedUnits: genealogy.quantity, verifiedBy: genealogy.verifiedBy, verifiedOn: genealogy.at }
 }
 
 export interface RecallAttemptPersistence { load(): RecallPortfolioState | null; save(state: RecallPortfolioState): void }
