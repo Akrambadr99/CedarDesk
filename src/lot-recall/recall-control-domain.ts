@@ -12,9 +12,11 @@ export function reconcileRecallDisposition(tracedUnits: number, repairedUnits: n
 export interface RecallAssignmentEvent { id: string; recallId: string; fromOwner: string; toOwner: string; reviewOn: string; reason: string; tracedPopulation: number; immutable: true }
 export interface RecallClosure { id: string; recallId: string; assignmentId: string; customerAcknowledgements: number; repairedUnits: number; scrappedUnits: number; releasedUnits: number; genealogyEvidence: string; determination: 'effective' | 'unsuccessful'; decidedBy: string; decidedOn: string; immutable: true }
 export interface RecallNotificationAttempt { id: string; recallId: string; customerId: string; recallRevision: number; action: 'recall-notification'; outcome: 'failed' | 'acknowledged'; failureReason: string | null; actor: string; attemptedOn: string; retryOf: string | null; immutable: true }
-export interface RecallPortfolioState { revision: number; recalls: RecallWorkload[]; assignmentHistory: RecallAssignmentEvent[]; notificationAttempts: RecallNotificationAttempt[]; closures: RecallClosure[] }
+export interface RecallCustomerAcknowledgement { id: string; recallId: string; customerId: string; notificationAttemptId: string; acknowledgedBy: string; acknowledgedOn: string; recallRevision: number; immutable: true }
+export interface RecallUnitDisposition { id: string; recallId: string; repairedUnits: number; scrappedUnits: number; releasedUnits: number; genealogyEvidence: string; decidedOn: string; effectivenessDecisionId: string; immutable: true }
+export interface RecallPortfolioState { revision: number; recalls: RecallWorkload[]; assignmentHistory: RecallAssignmentEvent[]; notificationAttempts: RecallNotificationAttempt[]; acknowledgements: RecallCustomerAcknowledgement[]; unitDispositions: RecallUnitDisposition[]; closures: RecallClosure[] }
 export const recallCapacityPolicy = { maximumActiveRecalls: 2 } as const
-export const initialRecallPortfolioState: RecallPortfolioState = { revision: 0, recalls: structuredClone(seededRecallWorkload), assignmentHistory: [], notificationAttempts: [], closures: [] }
+export const initialRecallPortfolioState: RecallPortfolioState = { revision: 0, recalls: structuredClone(seededRecallWorkload), assignmentHistory: [], notificationAttempts: [], acknowledgements: [], unitDispositions: [], closures: [] }
 
 interface ReassignRecallCommand { id: string; expectedRevision: number; authority: RecallAuthority; recallId: string; toOwner: string; reviewOn: string; asOf: string; reason: string }
 
@@ -52,6 +54,7 @@ export function recordRecallNotification(state: RecallPortfolioState, command: R
   if (command.outcome === 'failed' && !command.failureReason) throw new Error('Failed notification requires a failure reason.')
   const next = structuredClone(state)
   next.notificationAttempts.push({ id: command.id, recallId: command.recallId, customerId: command.customerId, recallRevision: state.revision, action: 'recall-notification', outcome: command.outcome, failureReason: command.failureReason, actor: command.actor, attemptedOn: command.attemptedOn, retryOf: command.retryOf, immutable: true })
+  if (command.outcome === 'acknowledged') next.acknowledgements.push({ id: `${command.id}:ack`, recallId: command.recallId, customerId: command.customerId, notificationAttemptId: command.id, acknowledgedBy: command.actor, acknowledgedOn: command.attemptedOn, recallRevision: state.revision, immutable: true })
   next.revision += 1
   return next
 }
@@ -64,7 +67,7 @@ export function determineRecallEffectiveness(state: RecallPortfolioState, comman
   const recall = state.recalls.find((item) => item.recallId === command.recallId)
   const assignment = [...state.assignmentHistory].reverse().find((item) => item.recallId === command.recallId)
   if (!recall || !assignment) throw new Error('A governed recall assignment is required before determination.')
-  const acknowledgedCustomers = new Set(state.notificationAttempts.filter((item) => item.recallId === command.recallId && item.outcome === 'acknowledged').map((item) => item.customerId))
+  const acknowledgedCustomers = new Set(state.acknowledgements.filter((item) => item.recallId === command.recallId).map((item) => item.customerId))
   if (acknowledgedCustomers.size !== recall.customerCount) throw new Error('Every affected customer must have a durable acknowledgement before closure.')
   if (command.customerAcknowledgements !== acknowledgedCustomers.size) throw new RecallControlError('DISPOSITION_MISMATCH', 'The reported acknowledgement count must match the durable customer history.')
   const reconciliation = reconcileRecallDisposition(recall.tracedUnits, command.repairedUnits, command.scrappedUnits, command.releasedUnits)
@@ -74,6 +77,7 @@ export function determineRecallEffectiveness(state: RecallPortfolioState, comman
   const target = next.recalls.find((item) => item.recallId === recall.recallId)
   if (!target) throw new Error('Recall disappeared during closure.')
   next.closures.push({ ...command, assignmentId: assignment.id, immutable: true })
+  next.unitDispositions.push({ id: `${command.id}:disposition`, recallId: command.recallId, repairedUnits: command.repairedUnits, scrappedUnits: command.scrappedUnits, releasedUnits: command.releasedUnits, genealogyEvidence: command.genealogyEvidence, decidedOn: command.decidedOn, effectivenessDecisionId: command.id, immutable: true })
   target.recoveredUnits = recall.tracedUnits
   target.quarantinedUnits = 0
   target.escalated = false
@@ -81,10 +85,26 @@ export function determineRecallEffectiveness(state: RecallPortfolioState, comman
   return next
 }
 
-export class RecallPortfolioRepository {
+export function getRecallRecoveryTimeline(state: RecallPortfolioState, recallId: string, customerId?: string) {
+  return {
+    attempts: state.notificationAttempts.filter((item) => item.recallId === recallId && (!customerId || item.customerId === customerId)),
+    acknowledgements: state.acknowledgements.filter((item) => item.recallId === recallId && (!customerId || item.customerId === customerId)),
+    dispositions: state.unitDispositions.filter((item) => item.recallId === recallId),
+    decisions: state.closures.filter((item) => item.recallId === recallId),
+  }
+}
+
+export interface RecallAttemptPersistence { load(): RecallPortfolioState | null; save(state: RecallPortfolioState): void }
+export class BrowserRecallAttemptPersistence implements RecallAttemptPersistence {
   static key = 'forgeaxis:recall-portfolio:v2'
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
-  read(): RecallPortfolioState { const raw = this.storage.getItem(RecallPortfolioRepository.key); return raw ? JSON.parse(raw) as RecallPortfolioState : structuredClone(initialRecallPortfolioState) }
-  dispatch(command: ReassignRecallCommand | RecordRecallNotification | DetermineRecallEffectiveness) { const current = this.read(); const next = 'customerId' in command ? recordRecallNotification(current, command) : 'determination' in command ? determineRecallEffectiveness(current, command) : reassignCriticalRecall(current, command); if (next !== current) this.storage.setItem(RecallPortfolioRepository.key, JSON.stringify(next)); return next }
+  load() { const raw = this.storage.getItem(BrowserRecallAttemptPersistence.key); if (!raw) return null; const saved = JSON.parse(raw) as Partial<RecallPortfolioState>; const attempts = saved.notificationAttempts ?? []; return { ...(saved as RecallPortfolioState), notificationAttempts: attempts, acknowledgements: saved.acknowledgements ?? attempts.filter((item) => item.outcome === 'acknowledged').map((item) => ({ id: `${item.id}:ack`, recallId: item.recallId, customerId: item.customerId, notificationAttemptId: item.id, acknowledgedBy: item.actor, acknowledgedOn: item.attemptedOn, recallRevision: item.recallRevision, immutable: true })), unitDispositions: saved.unitDispositions ?? [] } }
+  save(state: RecallPortfolioState) { this.storage.setItem(BrowserRecallAttemptPersistence.key, JSON.stringify(state)) }
+}
+export class RecallPortfolioRepository {
+  private readonly persistence: RecallAttemptPersistence
+  constructor(persistence: RecallAttemptPersistence) { this.persistence = persistence }
+  read(): RecallPortfolioState { return this.persistence.load() ?? structuredClone(initialRecallPortfolioState) }
+  dispatch(command: ReassignRecallCommand | RecordRecallNotification | DetermineRecallEffectiveness) { const current = this.read(); const next = 'customerId' in command ? recordRecallNotification(current, command) : 'determination' in command ? determineRecallEffectiveness(current, command) : reassignCriticalRecall(current, command); if (next !== current) this.persistence.save(next); return next }
 }
