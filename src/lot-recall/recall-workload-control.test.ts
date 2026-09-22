@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallLineageBalance, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, openRecallLineageInvestigation, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource, resolveRecallLineageInvestigation, reviewRecallLineageEvidence } from './recall-control-domain'
+import { browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallLineageBalance, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, inspectRecallIntegrity, openRecallLineageInvestigation, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource, resolveRecallLineageInvestigation, reviewRecallLineageEvidence } from './recall-control-domain'
 
 it('resolves only source-backed recall lineage and preserves residual quantity and original investigation', () => {
   const opened = openRecallLineageInvestigation(initialRecallPortfolioState, { id: 'investigate-1', expectedRevision: 0, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', conflictingShipmentReference: 'SHIP-UNKNOWN', owner: 'Traceability analyst', evidenceRequired: 'Original dispatch manifest and customer shipment line', openedOn: '2026-10-22' })
@@ -28,6 +28,32 @@ it('resolves only source-backed recall lineage and preserves residual quantity a
   expect(new BrowserRecallAttemptPersistence({ getItem: () => JSON.stringify(old), setItem: () => undefined }).load()).toMatchObject({ lineageInvestigations: [], lineageResolutions: [], lineageReviews: [] })
 })
 import { initialFactoryExecution } from '../factory/execution-control'
+
+it('reports recall evidence integrity gaps without changing persisted business facts', () => {
+  const state = structuredClone(initialRecallPortfolioState)
+  state.shipmentSources.push({ id: 'line-1', recallId: 'RECALL-SEAL-B88', shipmentReference: '', lineReference: 'LINE-1', customerId: 'CUSTOMER-1', lotReference: 'SEAL-B88', affectedUnits: 50, sourceDocument: '', recordedBy: 'analyst', sourceRevision: 1, immutable: true })
+  state.lineageInvestigations.push({ id: 'investigation-1', recallId: 'RECALL-SEAL-B88', affectedUnits: 45, tracedAtOpening: 0, openedAtRevision: 0, conflictingShipmentReference: null, owner: 'analyst', evidenceRequired: 'Original dispatch line', openedOn: '2026-10-22', immutable: true })
+  state.lineageResolutions.push({ id: 'resolution-1', investigationId: 'investigation-1', shipmentSourceIds: ['missing-line'], sourceRevisions: { 'missing-line': 1 }, reviewRequired: true, resolvedUnits: 20, residualUnits: 25, evidenceReference: 'document-1', resolvedBy: 'analyst', resolvedOn: '2026-10-23', immutable: true })
+  state.notificationAttempts.push({ id: 'attempt-1', recallId: 'RECALL-SEAL-B88', customerId: 'CUSTOMER-1', shipmentReference: 'SHIP-77', lotReference: 'SEAL-B88', unitReferences: ['UNIT-1'], recallRevision: 1, action: 'recall-notification', outcome: 'failed', failureReason: 'gateway failure', actor: 'operator', attemptedOn: '2026-10-22', retryOf: null, immutable: true })
+  state.acknowledgements.push({ id: 'ack-1', recallId: 'RECALL-SEAL-B88', customerId: 'CUSTOMER-1', notificationAttemptId: 'attempt-1', acknowledgedBy: 'operator', acknowledgedOn: '2026-10-22', recallRevision: 1, immutable: true })
+  const original = structuredClone(state)
+  const findings = inspectRecallIntegrity(state, initialFactoryExecution, 'RECALL-SEAL-B88')
+  expect(findings.map((item) => item.code)).toEqual(expect.arrayContaining(['PRODUCTION_SOURCE', 'QUANTITY', 'SHIPMENT_SOURCE', 'LINEAGE_REVIEW', 'ACKNOWLEDGEMENT']))
+  expect(findings.every((item) => item.recordId && item.remediation)).toBe(true)
+  expect(state).toEqual(original)
+})
+
+it('accepts verified production linkage and keeps notification retries from double-counting unit ownership', () => {
+  const execution = structuredClone(initialFactoryExecution)
+  execution.genealogy.push({ id: 'genealogy-1', orderId: 'order-1', inputLotId: 'lot-1', outputLotId: 'SEAL-B88', quantity: 100, verifiedBy: 'quality-a', at: '2026-10-20' })
+  execution.allocations.push({ id: 'allocation-1', orderId: 'order-1', lotId: 'lot-1', kilograms: 200, requestedBy: 'supervisor-a', status: 'consumed', revision: 2 })
+  const state = structuredClone(initialRecallPortfolioState)
+  state.notificationAttempts.push({ id: 'attempt-1', recallId: 'RECALL-SEAL-B88', customerId: 'CUSTOMER-1', shipmentReference: 'SHIP-77', lotReference: 'SEAL-B88', unitReferences: ['UNIT-1'], recallRevision: 0, action: 'recall-notification', outcome: 'failed', failureReason: 'gateway failure', actor: 'operator', attemptedOn: '2026-10-22', retryOf: null, immutable: true })
+  state.notificationAttempts.push({ ...state.notificationAttempts[0]!, id: 'attempt-2', outcome: 'acknowledged', failureReason: null, retryOf: 'attempt-1' })
+  expect(inspectRecallIntegrity(state, execution, 'RECALL-SEAL-B88')).toEqual([])
+  state.notificationAttempts.push({ ...state.notificationAttempts[0]!, id: 'attempt-3', customerId: 'CUSTOMER-2', retryOf: null })
+  expect(inspectRecallIntegrity(state, execution, 'RECALL-SEAL-B88')).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'DUPLICATE_UNIT', recordId: 'attempt-3' })]))
+})
 
 it('resolves recalled lot only through matching consumed allocation and verified factory genealogy', () => { const missing = getRecallProductionLink(initialRecallPortfolioState, initialFactoryExecution, 'RECALL-SEAL-B88'); expect(missing).toMatchObject({ status: 'missing', orderId: null }); const execution = structuredClone(initialFactoryExecution); execution.revision = 3; execution.genealogy.push({ id: 'genealogy-1', orderId: 'order-1', inputLotId: 'lot-1', outputLotId: 'SEAL-B88', quantity: 100, verifiedBy: 'quality-a', at: '2026-10-20' }); expect(getRecallProductionLink(initialRecallPortfolioState, execution, 'RECALL-SEAL-B88')?.status).toBe('incomplete'); execution.allocations.push({ id: 'allocation-1', orderId: 'order-1', lotId: 'lot-1', kilograms: 200, requestedBy: 'supervisor-a', status: 'consumed', revision: 2 }); expect(getRecallProductionLink(initialRecallPortfolioState, execution, 'RECALL-SEAL-B88')).toMatchObject({ status: 'verified', orderId: 'order-1', inputLotId: 'lot-1', genealogyId: 'genealogy-1', sourceRevision: 3 }); execution.genealogy.push({ ...execution.genealogy[0]!, id: 'genealogy-2', orderId: 'order-2' }); expect(getRecallProductionLink(initialRecallPortfolioState, execution, 'RECALL-SEAL-B88')?.status).toBe('conflicting') })
 

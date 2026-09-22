@@ -334,6 +334,63 @@ export function getRecallProductionLink(state: RecallPortfolioState, execution: 
   return { status: 'verified' as const, lotReference: genealogy.outputLotId, sourceRevision: execution.revision, orderId: genealogy.orderId, inputLotId: genealogy.inputLotId, genealogyId: genealogy.id, allocationId: allocation.id, producedUnits: genealogy.quantity, verifiedBy: genealogy.verifiedBy, verifiedOn: genealogy.at }
 }
 
+export interface RecallIntegrityFinding {
+  code: 'PRODUCTION_SOURCE' | 'QUANTITY' | 'SHIPMENT_SOURCE' | 'LINEAGE_REVIEW' | 'ACKNOWLEDGEMENT' | 'RETURN_SOURCE' | 'DISPOSITION' | 'EFFECTIVENESS' | 'DUPLICATE_UNIT'
+  recordId: string
+  detail: string
+  remediation: string
+}
+
+/** Inspects existing evidence; it never creates or repairs a business record. */
+export function inspectRecallIntegrity(state: RecallPortfolioState, execution: FactoryExecutionState, recallId: string): RecallIntegrityFinding[] {
+  const recall = state.recalls.find((item) => item.recallId === recallId)
+  if (!recall) return []
+  const findings: RecallIntegrityFinding[] = []
+  const add = (code: RecallIntegrityFinding['code'], recordId: string, detail: string, remediation: string) => { findings.push({ code, recordId, detail, remediation }) }
+  const production = getRecallProductionLink(state, execution, recallId)
+  if (production?.status !== 'verified') add('PRODUCTION_SOURCE', recallId, `Production genealogy is ${production?.status ?? 'missing'} for ${recall.genealogyReference}.`, 'Inspect the factory execution genealogy and consumed material allocation; do not infer a production lot.')
+  const sources = state.shipmentSources.filter((item) => item.recallId === recallId)
+  const sourceById = new Map(sources.map((item) => [item.id, item]))
+  const activeSources = sources.filter((item) => !rejectedLegacySource(state, item))
+  const sourcedUnits = activeSources.reduce((sum, item) => sum + item.affectedUnits, 0)
+  if (sourcedUnits > recall.tracedUnits) add('QUANTITY', recallId, `${String(sourcedUnits)} shipment units exceed the ${String(recall.tracedUnits)} affected units.`, 'Reconcile attested shipment lines against the original affected production population.')
+  const balance = getRecallLineageBalance(state, recallId)
+  if (balance && (balance.untracedUnits < 0 || balance.tracedShipmentUnits + balance.nonShippedUnits + balance.untracedUnits !== balance.affectedUnits)) add('QUANTITY', recallId, 'Reviewed shipment and non-shipped quantities do not reconcile to the affected population.', 'Review accepted lineage and residual disposition evidence before deciding effectiveness.')
+  for (const source of sources) {
+    if (!source.shipmentReference.trim() || !source.lineReference.trim() || !source.customerId.trim() || source.lotReference !== recall.genealogyReference || (!source.sourceDocument.trim() && !source.legacyAttestation?.trim())) add('SHIPMENT_SOURCE', source.id, `Shipment line ${source.id} lacks an authoritative dispatch or legacy attestation reference.`, 'Locate the original dispatch line and review any legacy attestation independently.')
+  }
+  for (const resolution of state.lineageResolutions.filter((item) => state.lineageInvestigations.some((investigation) => investigation.id === item.investigationId && investigation.recallId === recallId))) {
+    if (resolution.shipmentSourceIds.some((id) => !sourceById.has(id) || sourceById.get(id)?.sourceRevision !== resolution.sourceRevisions?.[id])) add('LINEAGE_REVIEW', resolution.id, `Investigated linkage ${resolution.id} points to a missing or changed shipment source revision.`, 'Inspect the reviewed shipment revision and submit a new investigated linkage if evidence changed.')
+  }
+  const attempts = state.notificationAttempts.filter((item) => item.recallId === recallId)
+  const attemptById = new Map(attempts.map((item) => [item.id, item]))
+  const firstUnitOwner = new Map<string, string>()
+  for (const attempt of attempts) {
+    if (attempt.retryOf) continue // Retries legitimately repeat the same serialized units.
+    for (const unit of attempt.unitReferences) {
+      const owner = firstUnitOwner.get(unit)
+      if (owner && owner !== attempt.customerId) add('DUPLICATE_UNIT', attempt.id, `Unit ${unit} is assigned to both ${owner} and ${attempt.customerId}.`, 'Check the original shipment lines and correct customer lineage through reviewed evidence.')
+      else firstUnitOwner.set(unit, attempt.customerId)
+    }
+  }
+  for (const acknowledgement of state.acknowledgements.filter((item) => item.recallId === recallId)) {
+    const attempt = attemptById.get(acknowledgement.notificationAttemptId)
+    if (attempt?.outcome !== 'acknowledged' || attempt.customerId !== acknowledgement.customerId || attempt.recallRevision !== acknowledgement.recallRevision) add('ACKNOWLEDGEMENT', acknowledgement.id, `Acknowledgement ${acknowledgement.id} has no matching successful notification revision.`, 'Find the original notification attempt and verify its customer and recall revision.')
+  }
+  for (const returned of state.shipmentReturns) {
+    const source = sourceById.get(returned.shipmentSourceId)
+    if (source && returned.returnedUnits > source.affectedUnits) add('RETURN_SOURCE', returned.id, `Returned-unit custody ${returned.id} exceeds its affected shipment line.`, 'Reconcile the custody receipt against the attested shipment line and affected quantity.')
+  }
+  for (const disposition of state.unitDispositions.filter((item) => item.recallId === recallId)) {
+    const total = disposition.repairedUnits + disposition.scrappedUnits + disposition.releasedUnits
+    if (total > recall.recoveredUnits || !state.closures.some((item) => item.id === disposition.effectivenessDecisionId && item.recallId === recallId)) add('DISPOSITION', disposition.id, `Disposition ${disposition.id} is not supported by recovered units and a linked effectiveness decision.`, 'Inspect returned-unit custody and the original signed effectiveness decision.')
+  }
+  for (const closure of state.closures.filter((item) => item.recallId === recallId)) {
+    if (!state.assignmentHistory.some((item) => item.id === closure.assignmentId && item.recallId === recallId) || (sources.length > 0 && !balance?.complete) || state.acknowledgements.filter((item) => item.recallId === recallId).length < recall.customerCount) add('EFFECTIVENESS', closure.id, `Effectiveness decision ${closure.id} lacks complete assignment, lineage, or customer acknowledgement evidence.`, 'Reopen the evidence review; preserve the original decision and record any correction separately.')
+  }
+  return findings
+}
+
 export interface RecallAttemptPersistence { load(): RecallPortfolioState | null; save(state: RecallPortfolioState): void }
 export class BrowserRecallAttemptPersistence implements RecallAttemptPersistence {
   static key = 'forgeaxis:recall-portfolio:v2'
