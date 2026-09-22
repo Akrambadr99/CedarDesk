@@ -1,20 +1,31 @@
 import { describe, expect, it } from 'vitest'
-import { browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallLineageBalance, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, openRecallLineageInvestigation, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource, resolveRecallLineageInvestigation } from './recall-control-domain'
+import { browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallLineageBalance, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, openRecallLineageInvestigation, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource, resolveRecallLineageInvestigation, reviewRecallLineageEvidence } from './recall-control-domain'
 
 it('resolves only source-backed recall lineage and preserves residual quantity and original investigation', () => {
   const opened = openRecallLineageInvestigation(initialRecallPortfolioState, { id: 'investigate-1', expectedRevision: 0, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', conflictingShipmentReference: 'SHIP-UNKNOWN', owner: 'Traceability analyst', evidenceRequired: 'Original dispatch manifest and customer shipment line', openedOn: '2026-10-22' })
   expect(getRecallLineageBalance(opened, 'RECALL-SEAL-B88')).toMatchObject({ affectedUnits: 45, tracedShipmentUnits: 0, untracedUnits: 45 })
   expect(() => openRecallLineageInvestigation(initialRecallPortfolioState, { id: 'wrong-owner', expectedRevision: 0, authority: 'Quality Analyst', recallId: 'RECALL-SEAL-B88', conflictingShipmentReference: null, owner: 'analyst', evidenceRequired: 'Original dispatch manifest and customer shipment line', openedOn: '2026-10-22' })).toThrow('quality director')
   const line = recordRecallShipmentSource(opened, { id: 'line-after', expectedRevision: opened.revision, authority: 'Quality Analyst', recallId: 'RECALL-SEAL-B88', shipmentReference: 'SHIP-77', lineReference: 'LINE-1', customerId: 'CUSTOMER-1', lotReference: 'SEAL-B88', affectedUnits: 20, sourceDocument: 'DESPATCH-MANIFEST-77', recordedBy: 'analyst' })
-  const resolution = { id: 'resolution-1', expectedRevision: line.revision, authority: 'Quality Director' as const, investigationId: 'investigate-1', shipmentSourceIds: ['line-after'], evidenceReference: 'DESPATCH-MANIFEST-77', resolvedBy: 'director', resolvedOn: '2026-10-23' }
+  expect(getRecallLineageBalance(line, 'RECALL-SEAL-B88')?.untracedUnits).toBe(45)
+  const resolution = { id: 'resolution-1', expectedRevision: line.revision, authority: 'Quality Analyst' as const, investigationId: 'investigate-1', shipmentSourceIds: ['line-after'], evidenceReference: 'DESPATCH-MANIFEST-77', resolvedBy: 'analyst', resolvedOn: '2026-10-23' }
   expect(() => resolveRecallLineageInvestigation(line, { ...resolution, shipmentSourceIds: ['made-up-line'] })).toThrow('attested shipment lines')
   const resolved = resolveRecallLineageInvestigation(line, resolution)
   expect(resolved.lineageResolutions[0]).toMatchObject({ resolvedUnits: 20, residualUnits: 25, immutable: true })
   expect(resolved.lineageInvestigations[0]).toEqual(opened.lineageInvestigations[0])
-  expect(getRecallLineageBalance(resolved, 'RECALL-SEAL-B88')).toMatchObject({ tracedShipmentUnits: 20, untracedUnits: 25, complete: false })
+  expect(getRecallLineageBalance(resolved, 'RECALL-SEAL-B88')).toMatchObject({ tracedShipmentUnits: 0, untracedUnits: 45, complete: false })
   expect(resolveRecallLineageInvestigation(resolved, resolution)).toBe(resolved)
-  const old = { ...resolved } as Record<string, unknown>; delete old['lineageInvestigations']; delete old['lineageResolutions']
-  expect(new BrowserRecallAttemptPersistence({ getItem: () => JSON.stringify(old), setItem: () => undefined }).load()).toMatchObject({ lineageInvestigations: [], lineageResolutions: [] })
+  const review = { id: 'review-1', expectedRevision: resolved.revision, authority: 'Quality Director' as const, resolutionId: 'resolution-1', decision: 'accepted' as const, reviewer: 'independent director', reviewEvidence: 'MANIFEST-REVIEW-77', reviewedOn: '2026-10-24' }
+  expect(() => reviewRecallLineageEvidence(resolved, { ...review, reviewer: 'analyst' })).toThrow('Independent')
+  expect(() => reviewRecallLineageEvidence(resolved, { ...review, expectedRevision: 0 })).toThrow('changed')
+  const rejected = reviewRecallLineageEvidence(resolved, { ...review, decision: 'rejected' })
+  expect(getRecallLineageBalance(rejected, 'RECALL-SEAL-B88')?.untracedUnits).toBe(45)
+  expect(rejected.lineageResolutions).toEqual(resolved.lineageResolutions)
+  const revised = resolveRecallLineageInvestigation(rejected, { ...resolution, id: 'resolution-2', expectedRevision: rejected.revision })
+  const accepted = reviewRecallLineageEvidence(revised, { ...review, id: 'review-2', expectedRevision: revised.revision, resolutionId: 'resolution-2' })
+  expect(getRecallLineageBalance(accepted, 'RECALL-SEAL-B88')).toMatchObject({ tracedShipmentUnits: 20, untracedUnits: 25, complete: false })
+  expect(accepted.lineageReviews).toHaveLength(2)
+  const old = { ...accepted } as Record<string, unknown>; delete old['lineageInvestigations']; delete old['lineageResolutions']; delete old['lineageReviews']
+  expect(new BrowserRecallAttemptPersistence({ getItem: () => JSON.stringify(old), setItem: () => undefined }).load()).toMatchObject({ lineageInvestigations: [], lineageResolutions: [], lineageReviews: [] })
 })
 import { initialFactoryExecution } from '../factory/execution-control'
 
