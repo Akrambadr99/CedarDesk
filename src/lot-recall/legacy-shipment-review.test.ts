@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BrowserRecallAttemptPersistence, getRecallLineageBalance, initialRecallPortfolioState, recordLegacyShipmentAttestation, recordRecallShipmentReturn, recordRecallShipmentSource, reviewLegacyShipmentAttestation } from './recall-control-domain';
+import { BrowserRecallAttemptPersistence, getRecallLineageBalance, initialRecallPortfolioState, openRecallLineageInvestigation, proposeRecallResidualDisposition, reviewRecallResidualDisposition, recordLegacyShipmentAttestation, recordRecallShipmentReturn, recordRecallShipmentSource, reviewLegacyShipmentAttestation } from './recall-control-domain';
 
 const intake = { id: 'legacy-line-1', expectedRevision: 0, authority: 'Quality Analyst' as const, recallId: 'RECALL-SEAL-B88', shipmentReference: 'SHIP-OLD-77', lineReference: 'LINE-1', customerId: 'CUSTOMER-1', lotReference: 'SEAL-B88', affectedUnits: 20, attestationReference: 'HISTORICAL-ATTESTATION-77', recordedBy: 'Traceability analyst' };
 const review = { id: 'legacy-review-1', authority: 'Quality Director' as const, shipmentSourceId: intake.id, decision: 'accepted' as const, supportingEvidence: 'Signed dispatch line and original customer receipt inspected.', reviewer: 'Quality director', reviewedOn: '2026-10-24' };
@@ -38,4 +38,23 @@ describe('legacy shipment lineage', () => {
     expect(persistence.load()).toMatchObject({ shipmentSources: [{ sourceDocument: '', sourceRevision: 0 }], legacyShipmentReviews: [] });
     expect(getRecallLineageBalance(persistence.load()!, intake.recallId)?.untracedUnits).toBe(45);
   });
+});
+
+it('reconciles partial non-shipped quantity only after independent evidence review', () => {
+  const opened = openRecallLineageInvestigation(initialRecallPortfolioState, { id: 'investigate-residual', expectedRevision: 0, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', conflictingShipmentReference: null, owner: 'Traceability analyst', evidenceRequired: 'Scrap log and lot quantity reconciliation', openedOn: '2026-10-22' });
+  const proposal = { id: 'scrap-proposal', expectedRevision: opened.revision, authority: 'Quality Analyst' as const, investigationId: 'investigate-residual', kind: 'scrap' as const, units: 10, evidenceReference: 'SCRAP-LOG-B88', investigator: 'Traceability analyst', proposedOn: '2026-10-23' };
+  expect(() => proposeRecallResidualDisposition(opened, { ...proposal, units: 46 })).toThrow('quantity');
+  const submitted = proposeRecallResidualDisposition(opened, proposal);
+  expect(getRecallLineageBalance(submitted, 'RECALL-SEAL-B88')).toMatchObject({ affectedUnits: 45, tracedShipmentUnits: 0, nonShippedUnits: 0, untracedUnits: 45 });
+  const review = { id: 'scrap-review', expectedRevision: submitted.revision, authority: 'Quality Director' as const, dispositionId: proposal.id, decision: 'accepted' as const, reviewer: 'Quality director', reviewEvidence: 'Signed scrap count and lot log checked.', reviewedOn: '2026-10-24' };
+  expect(() => reviewRecallResidualDisposition(submitted, { ...review, reviewer: proposal.investigator })).toThrow('Independent reviewer');
+  const accepted = reviewRecallResidualDisposition(submitted, review);
+  expect(getRecallLineageBalance(accepted, 'RECALL-SEAL-B88')).toMatchObject({ affectedUnits: 45, tracedShipmentUnits: 0, nonShippedUnits: 10, untracedUnits: 35, complete: false });
+  expect(accepted.residualDispositions).toEqual(submitted.residualDispositions);
+  expect(() => reviewRecallResidualDisposition(accepted, { ...review, id: 'duplicate-review', expectedRevision: accepted.revision })).toThrow('unreviewed');
+  const second = proposeRecallResidualDisposition(accepted, { ...proposal, id: 'internal-proposal', expectedRevision: accepted.revision, kind: 'internal use', units: 35 });
+  const final = reviewRecallResidualDisposition(second, { ...review, id: 'internal-review', dispositionId: 'internal-proposal', expectedRevision: second.revision });
+  expect(getRecallLineageBalance(final, 'RECALL-SEAL-B88')).toMatchObject({ tracedShipmentUnits: 0, nonShippedUnits: 45, untracedUnits: 0, complete: true });
+  const legacy = { getItem: () => JSON.stringify({ ...submitted, residualDispositions: undefined, residualReviews: undefined }), setItem: () => undefined };
+  expect(new BrowserRecallAttemptPersistence(legacy).load()).toMatchObject({ residualDispositions: [], residualReviews: [] });
 });
