@@ -15,20 +15,31 @@ export interface RecallClosure { id: string; recallId: string; assignmentId: str
 export interface RecallNotificationAttempt { id: string; recallId: string; customerId: string; shipmentReference: string; lotReference: string; unitReferences: string[]; recallRevision: number; action: 'recall-notification'; outcome: 'failed' | 'acknowledged'; failureReason: string | null; actor: string; attemptedOn: string; retryOf: string | null; immutable: true }
 export interface RecallCustomerAcknowledgement { id: string; recallId: string; customerId: string; notificationAttemptId: string; acknowledgedBy: string; acknowledgedOn: string; recallRevision: number; immutable: true }
 export interface RecallUnitDisposition { id: string; recallId: string; repairedUnits: number; scrappedUnits: number; releasedUnits: number; genealogyEvidence: string; decidedOn: string; effectivenessDecisionId: string; immutable: true }
-export interface RecallShipmentSource { id: string; recallId: string; shipmentReference: string; lineReference: string; customerId: string; lotReference: string; affectedUnits: number; sourceDocument: string; recordedBy: string; sourceRevision: number; immutable: true }
+export interface RecallShipmentSource { id: string; recallId: string; shipmentReference: string; lineReference: string; customerId: string; lotReference: string; affectedUnits: number; sourceDocument: string; legacyAttestation?: string; recordedBy: string; sourceRevision: number; immutable: true }
+export interface LegacyShipmentReview { id: string; shipmentSourceId: string; sourceRevision: number; decision: 'accepted' | 'rejected'; supportingEvidence: string; reviewer: string; reviewedOn: string; immutable: true }
 export interface RecallShipmentReturn { id: string; shipmentSourceId: string; returnedUnits: number; custodyReference: string; receivedBy: string; receivedOn: string; immutable: true }
 export interface RecallLineageInvestigation { id: string; recallId: string; affectedUnits: number; tracedAtOpening: number; openedAtRevision: number; conflictingShipmentReference: string | null; owner: string; evidenceRequired: string; openedOn: string; immutable: true }
 export interface RecallLineageResolution { id: string; investigationId: string; shipmentSourceIds: string[]; sourceRevisions?: Record<string, number>; reviewRequired?: true; resolvedUnits: number; residualUnits: number; evidenceReference: string; resolvedBy: string; resolvedOn: string; immutable: true }
 export interface RecallLineageReview { id: string; resolutionId: string; decision: 'accepted' | 'rejected'; reviewer: string; reviewEvidence: string; reviewedOn: string; immutable: true }
-export interface RecallPortfolioState { revision: number; recalls: RecallWorkload[]; assignmentHistory: RecallAssignmentEvent[]; notificationAttempts: RecallNotificationAttempt[]; acknowledgements: RecallCustomerAcknowledgement[]; unitDispositions: RecallUnitDisposition[]; shipmentSources: RecallShipmentSource[]; shipmentReturns: RecallShipmentReturn[]; lineageInvestigations: RecallLineageInvestigation[]; lineageResolutions: RecallLineageResolution[]; lineageReviews: RecallLineageReview[]; closures: RecallClosure[] }
+export interface RecallPortfolioState { revision: number; recalls: RecallWorkload[]; assignmentHistory: RecallAssignmentEvent[]; notificationAttempts: RecallNotificationAttempt[]; acknowledgements: RecallCustomerAcknowledgement[]; unitDispositions: RecallUnitDisposition[]; shipmentSources: RecallShipmentSource[]; legacyShipmentReviews: LegacyShipmentReview[]; shipmentReturns: RecallShipmentReturn[]; lineageInvestigations: RecallLineageInvestigation[]; lineageResolutions: RecallLineageResolution[]; lineageReviews: RecallLineageReview[]; closures: RecallClosure[] }
 export const recallCapacityPolicy = { maximumActiveRecalls: 2 } as const
-export const initialRecallPortfolioState: RecallPortfolioState = { revision: 0, recalls: structuredClone(seededRecallWorkload), assignmentHistory: [], notificationAttempts: [], acknowledgements: [], unitDispositions: [], shipmentSources: [], shipmentReturns: [], lineageInvestigations: [], lineageResolutions: [], lineageReviews: [], closures: [] }
+export const initialRecallPortfolioState: RecallPortfolioState = { revision: 0, recalls: structuredClone(seededRecallWorkload), assignmentHistory: [], notificationAttempts: [], acknowledgements: [], unitDispositions: [], shipmentSources: [], legacyShipmentReviews: [], shipmentReturns: [], lineageInvestigations: [], lineageResolutions: [], lineageReviews: [], closures: [] }
+
+function reviewedLegacySource(state: RecallPortfolioState, source: RecallShipmentSource) {
+  if (source.sourceDocument.trim()) return true
+  return state.legacyShipmentReviews.some((review) => review.shipmentSourceId === source.id && review.sourceRevision === source.sourceRevision && review.decision === 'accepted')
+}
+
+function rejectedLegacySource(state: RecallPortfolioState, source: RecallShipmentSource) {
+  return !source.sourceDocument.trim() && state.legacyShipmentReviews.some((review) => review.shipmentSourceId === source.id && review.decision === 'rejected')
+}
 
 export function getRecallLineageBalance(state: RecallPortfolioState, recallId: string) {
   const recall = state.recalls.find((item) => item.recallId === recallId)
   if (!recall) return null
   const tracedShipmentUnits = state.shipmentSources.filter((item) => {
     if (item.recallId !== recallId) return false
+    if (!reviewedLegacySource(state, item)) return false
     const investigation = state.lineageInvestigations.find((entry) => entry.recallId === recallId && item.sourceRevision > entry.openedAtRevision)
     if (!investigation) return true
     return state.lineageResolutions.some((resolution) => resolution.investigationId === investigation.id && resolution.shipmentSourceIds.includes(item.id) && (!resolution.reviewRequired || state.lineageReviews.some((review) => review.resolutionId === resolution.id && review.decision === 'accepted')))
@@ -89,10 +100,38 @@ export function recordRecallShipmentSource(state: RecallPortfolioState, command:
   const recall = state.recalls.find((item) => item.recallId === command.recallId)
   if (recall?.genealogyReference !== command.lotReference) throw new Error('Shipment source must reference the affected recall lot.')
   if (!command.shipmentReference.trim() || !command.lineReference.trim() || !command.customerId.trim() || !command.sourceDocument.trim() || !command.recordedBy.trim() || !Number.isSafeInteger(command.affectedUnits) || command.affectedUnits <= 0) throw new Error('Shipment line, customer, positive affected quantity, and source document are required.')
-  if (state.shipmentSources.some((item) => item.shipmentReference === command.shipmentReference && item.lineReference === command.lineReference)) throw new Error('Shipment line was already attested.')
-  if (state.shipmentSources.filter((item) => item.recallId === command.recallId).reduce((sum, item) => sum + item.affectedUnits, 0) + command.affectedUnits > recall.tracedUnits) throw new Error('Attested shipment quantity exceeds the traced recall population.')
+  if (state.shipmentSources.some((item) => item.shipmentReference === command.shipmentReference && item.lineReference === command.lineReference && !rejectedLegacySource(state, item))) throw new Error('Shipment line was already attested.')
+  if (state.shipmentSources.filter((item) => item.recallId === command.recallId && !rejectedLegacySource(state, item)).reduce((sum, item) => sum + item.affectedUnits, 0) + command.affectedUnits > recall.tracedUnits) throw new Error('Attested shipment quantity exceeds the traced recall population.')
   const next = structuredClone(state)
   next.shipmentSources.push({ id: command.id, recallId: command.recallId, shipmentReference: command.shipmentReference.trim(), lineReference: command.lineReference.trim(), customerId: command.customerId.trim(), lotReference: command.lotReference, affectedUnits: command.affectedUnits, sourceDocument: command.sourceDocument.trim(), recordedBy: command.recordedBy.trim(), sourceRevision: state.revision, immutable: true })
+  next.revision += 1
+  return next
+}
+
+export function recordLegacyShipmentAttestation(state: RecallPortfolioState, command: { id: string; expectedRevision: number; authority: RecallAuthority; recallId: string; shipmentReference: string; lineReference: string; customerId: string; lotReference: string; affectedUnits: number; attestationReference: string; recordedBy: string }) {
+  if (state.shipmentSources.some((item) => item.id === command.id)) return state
+  if (state.revision !== command.expectedRevision) throw new RecallControlError('STALE_REVISION', 'Recall changed before legacy attestation intake.')
+  if (command.authority !== 'Quality Analyst') throw new RecallControlError('UNAUTHORIZED', 'Only quality analysts can intake legacy shipment attestations.')
+  const recall = state.recalls.find((item) => item.recallId === command.recallId)
+  if (recall?.genealogyReference !== command.lotReference || !command.shipmentReference.trim() || !command.lineReference.trim() || !command.customerId.trim() || !command.attestationReference.trim() || !command.recordedBy.trim() || !Number.isSafeInteger(command.affectedUnits) || command.affectedUnits <= 0) throw new Error('Existing lot, shipment, customer, positive quantity and historical attestation reference are required.')
+  if (state.shipmentSources.some((item) => item.shipmentReference === command.shipmentReference && item.lineReference === command.lineReference && !rejectedLegacySource(state, item))) throw new Error('Shipment line already has an active attestation.')
+  const allocated = state.shipmentSources.filter((item) => item.recallId === command.recallId && !rejectedLegacySource(state, item)).reduce((sum, item) => sum + item.affectedUnits, 0)
+  if (allocated + command.affectedUnits > recall.tracedUnits) throw new Error('Attested shipment quantity exceeds the traced recall population.')
+  const next = structuredClone(state)
+  next.shipmentSources.push({ id: command.id, recallId: command.recallId, shipmentReference: command.shipmentReference.trim(), lineReference: command.lineReference.trim(), customerId: command.customerId.trim(), lotReference: command.lotReference, affectedUnits: command.affectedUnits, sourceDocument: '', legacyAttestation: command.attestationReference.trim(), recordedBy: command.recordedBy.trim(), sourceRevision: state.revision, immutable: true })
+  next.revision += 1
+  return next
+}
+
+export function reviewLegacyShipmentAttestation(state: RecallPortfolioState, command: { id: string; expectedRevision: number; authority: RecallAuthority; shipmentSourceId: string; decision: LegacyShipmentReview['decision']; supportingEvidence: string; reviewer: string; reviewedOn: string }) {
+  if (state.legacyShipmentReviews.some((item) => item.id === command.id)) return state
+  if (state.revision !== command.expectedRevision) throw new RecallControlError('STALE_REVISION', 'Recall changed before legacy attestation review.')
+  if (command.authority !== 'Quality Director') throw new RecallControlError('UNAUTHORIZED', 'Only the quality director can review legacy shipment attestations.')
+  const source = state.shipmentSources.find((item) => item.id === command.shipmentSourceId)
+  if (!source || source.sourceDocument.trim() || state.legacyShipmentReviews.some((item) => item.shipmentSourceId === source.id)) throw new Error('An unreviewed legacy shipment attestation is required.')
+  if (!command.supportingEvidence.trim() || !command.reviewer.trim() || command.reviewer === source.recordedBy) throw new Error('Independent reviewer and actual supporting or rejection evidence are required.')
+  const next = structuredClone(state)
+  next.legacyShipmentReviews.push({ id: command.id, shipmentSourceId: source.id, sourceRevision: source.sourceRevision, decision: command.decision, supportingEvidence: command.supportingEvidence.trim(), reviewer: command.reviewer.trim(), reviewedOn: command.reviewedOn, immutable: true })
   next.revision += 1
   return next
 }
@@ -103,6 +142,7 @@ export function recordRecallShipmentReturn(state: RecallPortfolioState, command:
   if (command.authority !== 'Quality Director') throw new RecallControlError('UNAUTHORIZED', 'Only the quality director can accept recovered shipment custody.')
   const source = state.shipmentSources.find((item) => item.id === command.shipmentSourceId)
   if (!source) throw new Error('Attested shipment source is required for returned units.')
+  if (!reviewedLegacySource(state, source)) throw new Error('Legacy shipment attestation requires independent acceptance before returned-unit custody.')
   const alreadyReturned = state.shipmentReturns.filter((item) => item.shipmentSourceId === source.id).reduce((sum, item) => sum + item.returnedUnits, 0)
   if (!Number.isSafeInteger(command.returnedUnits) || command.returnedUnits <= 0 || alreadyReturned + command.returnedUnits > source.affectedUnits || !command.custodyReference.trim() || !command.receivedBy.trim()) throw new Error('Return requires valid remaining units and durable custody evidence.')
   const originalRecall = state.recalls.find((item) => item.recallId === source.recallId)
@@ -267,12 +307,12 @@ export class BrowserRecallAttemptPersistence implements RecallAttemptPersistence
   static key = 'forgeaxis:recall-portfolio:v2'
   private readonly storage: Pick<Storage, 'getItem' | 'setItem'>
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>) { this.storage = storage }
-  load() { const raw = this.storage.getItem(BrowserRecallAttemptPersistence.key); if (!raw) return null; type SavedAttempt = Omit<RecallNotificationAttempt, 'shipmentReference' | 'lotReference' | 'unitReferences'> & { shipmentReference?: string; lotReference?: string; unitReferences?: string[] }; const saved = JSON.parse(raw) as Omit<Partial<RecallPortfolioState>, 'notificationAttempts'> & { notificationAttempts?: SavedAttempt[] }; const attempts = (saved.notificationAttempts ?? []).map((item) => ({ ...item, shipmentReference: item.shipmentReference ?? '', lotReference: item.lotReference ?? saved.recalls?.find((recall) => recall.recallId === item.recallId)?.genealogyReference ?? item.recallId, unitReferences: item.unitReferences ?? [] })); return { ...(saved as RecallPortfolioState), notificationAttempts: attempts, acknowledgements: saved.acknowledgements ?? attempts.filter((item) => item.outcome === 'acknowledged').map((item) => ({ id: `${item.id}:ack`, recallId: item.recallId, customerId: item.customerId, notificationAttemptId: item.id, acknowledgedBy: item.actor, acknowledgedOn: item.attemptedOn, recallRevision: item.recallRevision, immutable: true })), unitDispositions: saved.unitDispositions ?? [], shipmentSources: saved.shipmentSources ?? [], shipmentReturns: saved.shipmentReturns ?? [], lineageInvestigations: saved.lineageInvestigations ?? [], lineageResolutions: saved.lineageResolutions ?? [], lineageReviews: saved.lineageReviews ?? [] } }
+  load() { const raw = this.storage.getItem(BrowserRecallAttemptPersistence.key); if (!raw) return null; type SavedAttempt = Omit<RecallNotificationAttempt, 'shipmentReference' | 'lotReference' | 'unitReferences'> & { shipmentReference?: string; lotReference?: string; unitReferences?: string[] }; const saved = JSON.parse(raw) as Omit<Partial<RecallPortfolioState>, 'notificationAttempts' | 'shipmentSources'> & { notificationAttempts?: SavedAttempt[]; shipmentSources?: (Omit<RecallShipmentSource, 'sourceDocument' | 'sourceRevision'> & { sourceDocument?: string; sourceRevision?: number })[] }; const attempts = (saved.notificationAttempts ?? []).map((item) => ({ ...item, shipmentReference: item.shipmentReference ?? '', lotReference: item.lotReference ?? saved.recalls?.find((recall) => recall.recallId === item.recallId)?.genealogyReference ?? item.recallId, unitReferences: item.unitReferences ?? [] })); return { ...(saved as RecallPortfolioState), notificationAttempts: attempts, acknowledgements: saved.acknowledgements ?? attempts.filter((item) => item.outcome === 'acknowledged').map((item) => ({ id: `${item.id}:ack`, recallId: item.recallId, customerId: item.customerId, notificationAttemptId: item.id, acknowledgedBy: item.actor, acknowledgedOn: item.attemptedOn, recallRevision: item.recallRevision, immutable: true })), unitDispositions: saved.unitDispositions ?? [], shipmentSources: (saved.shipmentSources ?? []).map((item) => ({ ...item, sourceDocument: item.sourceDocument ?? '', sourceRevision: item.sourceRevision ?? 0 })), legacyShipmentReviews: saved.legacyShipmentReviews ?? [], shipmentReturns: saved.shipmentReturns ?? [], lineageInvestigations: saved.lineageInvestigations ?? [], lineageResolutions: saved.lineageResolutions ?? [], lineageReviews: saved.lineageReviews ?? [] } }
   save(state: RecallPortfolioState) { this.storage.setItem(BrowserRecallAttemptPersistence.key, JSON.stringify(state)) }
 }
 export class RecallPortfolioRepository {
   private readonly persistence: RecallAttemptPersistence
   constructor(persistence: RecallAttemptPersistence) { this.persistence = persistence }
   read(): RecallPortfolioState { return this.persistence.load() ?? structuredClone(initialRecallPortfolioState) }
-  dispatch(command: ReassignRecallCommand | RecordRecallNotification | DetermineRecallEffectiveness | Parameters<typeof recordRecallShipmentSource>[1] | Parameters<typeof recordRecallShipmentReturn>[1] | Parameters<typeof openRecallLineageInvestigation>[1] | Parameters<typeof resolveRecallLineageInvestigation>[1] | Parameters<typeof reviewRecallLineageEvidence>[1]) { const current = this.read(); const next = 'resolutionId' in command ? reviewRecallLineageEvidence(current, command) : 'shipmentSourceIds' in command ? resolveRecallLineageInvestigation(current, command) : 'evidenceRequired' in command ? openRecallLineageInvestigation(current, command) : 'shipmentSourceId' in command ? recordRecallShipmentReturn(current, command) : 'sourceDocument' in command ? recordRecallShipmentSource(current, command) : 'customerId' in command ? recordRecallNotification(current, command) : 'determination' in command ? determineRecallEffectiveness(current, command) : reassignCriticalRecall(current, command); if (next !== current) this.persistence.save(next); return next }
+  dispatch(command: ReassignRecallCommand | RecordRecallNotification | DetermineRecallEffectiveness | Parameters<typeof recordRecallShipmentSource>[1] | Parameters<typeof recordLegacyShipmentAttestation>[1] | Parameters<typeof reviewLegacyShipmentAttestation>[1] | Parameters<typeof recordRecallShipmentReturn>[1] | Parameters<typeof openRecallLineageInvestigation>[1] | Parameters<typeof resolveRecallLineageInvestigation>[1] | Parameters<typeof reviewRecallLineageEvidence>[1]) { const current = this.read(); const next = 'resolutionId' in command ? reviewRecallLineageEvidence(current, command) : 'shipmentSourceIds' in command ? resolveRecallLineageInvestigation(current, command) : 'evidenceRequired' in command ? openRecallLineageInvestigation(current, command) : 'shipmentSourceId' in command && 'decision' in command ? reviewLegacyShipmentAttestation(current, command) : 'shipmentSourceId' in command ? recordRecallShipmentReturn(current, command) : 'attestationReference' in command ? recordLegacyShipmentAttestation(current, command) : 'sourceDocument' in command ? recordRecallShipmentSource(current, command) : 'customerId' in command ? recordRecallNotification(current, command) : 'determination' in command ? determineRecallEffectiveness(current, command) : reassignCriticalRecall(current, command); if (next !== current) this.persistence.save(next); return next }
 }
