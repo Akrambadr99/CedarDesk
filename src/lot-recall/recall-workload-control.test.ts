@@ -1,3 +1,4 @@
+import { proposeRecallCustomerIdentity, reviewRecallCustomerIdentity, resolvedRecallAcknowledgements } from './recall-customer-identity'
 import { createElement } from 'react'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -381,4 +382,110 @@ it('binds complete customer populations to source identities while preserving ex
   const legacy = recordRecallNotification(initialRecallPortfolioState, { ...notification, id: 'legacy-shaft-ack', expectedRevision: 0, customerId: 'OPERATOR-IDENTIFIED-LEGACY-CUSTOMER' })
   expect(legacy.acknowledgements.at(-1)).toMatchObject({ identityBasis: 'operator attributed', customerSources: [] })
   expect(getRecallCustomerIdentityCoverage(legacy, notification.recallId)?.unresolvedIdentities).toBe(1)
+})
+
+function legacyCustomerReceipt() {
+  return recordRecallNotification(initialRecallPortfolioState, { id: 'legacy-receipt', expectedRevision: 0, authority: 'Quality Director', recallId: 'RECALL-SHAFT-A03', customerId: 'LEGACY-SHAFT', outcome: 'acknowledged', failureReason: null, actor: 'Receipt desk', attemptedOn: '2026-10-24', retryOf: null })
+}
+function sourcedLegacyReceipt() {
+  const receipt = legacyCustomerReceipt()
+  return recordRecallShipmentSource(receipt, { id: 'shaft-source', expectedRevision: receipt.revision, authority: 'Quality Analyst', recallId: 'RECALL-SHAFT-A03', shipmentReference: 'SHAFT-SHIP-1', lineReference: 'SHAFT-LINE-1', customerId: 'REAL-SHAFT-CUSTOMER', lotReference: 'SHAFT-A03', affectedUnits: 30, sourceDocument: 'SIGNED-SHAFT-MANIFEST', recordedBy: 'Source analyst' })
+}
+function identityProposalCommand(state: ReturnType<typeof sourcedLegacyReceipt>) {
+  return { id: 'identity-proposal', expectedRevision: state.revision, authority: 'Quality Analyst' as const, acknowledgementId: 'legacy-receipt:ack', shipmentSourceId: 'shaft-source', sourceRevision: state.shipmentSources[0]?.sourceRevision ?? -1, evidence: 'SIGNED-ALIAS-CUSTOMER-LINK', submittedBy: 'Investigator', submittedOn: '2026-10-26' }
+}
+it('reconciles legacy customer identity through independent evidence without changing the original receipt', () => {
+  const state = sourcedLegacyReceipt()
+  const proposal = proposeRecallCustomerIdentity(state, identityProposalCommand(state))
+  expect(resolvedRecallAcknowledgements(proposal)[0]?.customerId).toBe('LEGACY-SHAFT')
+  const accepted = reviewRecallCustomerIdentity(proposal, { id: 'identity-review', expectedRevision: proposal.revision, authority: 'Quality Director', identityProposalId: 'identity-proposal', decision: 'accepted', evidence: 'SIGNED-DIRECTOR-REVIEW', reviewer: 'Director', reviewedOn: '2026-10-27' })
+  expect(resolvedRecallAcknowledgements(accepted)[0]).toMatchObject({ customerId: 'REAL-SHAFT-CUSTOMER', customerSources: [{ id: 'shaft-source', sourceRevision: state.shipmentSources[0]?.sourceRevision }] })
+  expect(accepted.acknowledgements).toEqual(state.acknowledgements)
+  expect(accepted.notificationAttempts).toEqual(state.notificationAttempts)
+  expect(() => proposeCustomerRecallDisposition(state, { id: 'customer-site', expectedRevision: state.revision, authority: 'Quality Analyst', shipmentSourceId: 'shaft-source', repairedUnits: 30, scrappedUnits: 0, releasedUnits: 0, customerEvidence: 'SIGNED-CUSTOMER-REPAIR', submittedBy: 'Site analyst', submittedOn: '2026-10-28' })).toThrow('acknowledgement')
+  const disposition = proposeCustomerRecallDisposition(accepted, { id: 'customer-site', expectedRevision: accepted.revision, authority: 'Quality Analyst', shipmentSourceId: 'shaft-source', repairedUnits: 30, scrappedUnits: 0, releasedUnits: 0, customerEvidence: 'SIGNED-CUSTOMER-REPAIR', submittedBy: 'Site analyst', submittedOn: '2026-10-28' })
+  expect(disposition.customerDispositions[0]?.acknowledgementId).toBe('legacy-receipt:ack')
+  expect(reviewCustomerRecallDisposition(disposition, { id: 'site-review', expectedRevision: disposition.revision, authority: 'Quality Director', customerDispositionId: 'customer-site', decision: 'accepted', reviewEvidence: 'SITE-INSPECTION-REVIEW', reviewer: 'Director', reviewedOn: '2026-10-29' }).customerDispositionReviews).toHaveLength(1)
+  expect(getRecallEffectivenessCoverage(disposition, 'RECALL-SHAFT-A03')?.acknowledgedCustomers).toBe(1)
+})
+it('rejects foreign sources, stale revisions, impossible dates and unauthorized identity proposals atomically', () => {
+  const state = sourcedLegacyReceipt(); const original = structuredClone(state); const command = identityProposalCommand(state)
+  expect(() => proposeRecallCustomerIdentity(state, { ...command, authority: 'Quality Director' })).toThrow('quality analyst')
+  expect(() => proposeRecallCustomerIdentity(state, { ...command, expectedRevision: 0 })).toThrow('changed')
+  expect(() => proposeRecallCustomerIdentity(state, { ...command, submittedOn: '2026-02-30' })).toThrow('valid date')
+  expect(() => proposeRecallCustomerIdentity(state, { ...command, sourceRevision: 99 })).toThrow('same recall')
+  const foreign = structuredClone(state); if (foreign.shipmentSources[0]) foreign.shipmentSources[0].recallId = 'RECALL-SEAL-B88'
+  expect(() => proposeRecallCustomerIdentity(foreign, command)).toThrow('same recall')
+  expect(state).toEqual(original)
+})
+it('returns identity evidence and permits a revised proposal while refusing self review and changed source facts', () => {
+  const state = sourcedLegacyReceipt(); const command = identityProposalCommand(state)
+  const proposal = proposeRecallCustomerIdentity(state, command)
+  const review = { id: 'identity-review', expectedRevision: proposal.revision, authority: 'Quality Director' as const, identityProposalId: command.id, decision: 'accepted' as const, evidence: 'DIRECTOR-LINK-REVIEW', reviewer: 'Director', reviewedOn: '2026-10-27' }
+  expect(() => reviewRecallCustomerIdentity(proposal, { ...review, reviewer: 'Investigator' })).toThrow('Independent')
+  const changed = structuredClone(proposal); if (changed.shipmentSources[0]) changed.shipmentSources[0].sourceRevision += 1
+  expect(() => reviewRecallCustomerIdentity(changed, review)).toThrow('unchanged')
+  const returned = reviewRecallCustomerIdentity(proposal, { ...review, decision: 'returned' })
+  const revised = proposeRecallCustomerIdentity(returned, { ...command, id: 'revised-link', expectedRevision: returned.revision, evidence: 'CORRECTED-CUSTOMER-LINK' })
+  expect(revised.identityProposals).toHaveLength(2)
+  expect(resolvedRecallAcknowledgements(revised)[0]?.customerId).toBe('LEGACY-SHAFT')
+})
+it('loads prior recall state without inventing identity proposals', () => {
+  const legacy = sourcedLegacyReceipt()
+  const loaded = new BrowserRecallAttemptPersistence({ getItem: () => JSON.stringify(legacy), setItem: () => undefined }).load()
+  expect(loaded?.identityProposals).toEqual([])
+  expect(loaded?.identityReviews).toEqual([])
+  expect(loaded?.acknowledgements).toEqual(legacy.acknowledgements)
+})
+it('preserves selected identity evidence after stale submission and isolates drafts by recall', async () => {
+  cleanup(); localStorage.clear(); localStorage.setItem(BrowserRecallAttemptPersistence.key, JSON.stringify(sourcedLegacyReceipt()))
+  localStorage.setItem('forgeaxis:effectiveness-recall:v1', 'RECALL-SHAFT-A03')
+  const user = userEvent.setup(); render(createElement(RecallWorkloadControl))
+  await user.selectOptions(screen.getByLabelText('Legacy customer receipt'), 'legacy-receipt:ack')
+  await user.selectOptions(screen.getByLabelText('Authoritative customer shipment'), 'shaft-source')
+  await user.click(screen.getByLabelText('Identity linkage evidence')); await user.paste('SIGNED-ALIAS-CUSTOMER-LINK')
+  const external = sourcedLegacyReceipt(); external.revision += 1; localStorage.setItem(BrowserRecallAttemptPersistence.key, JSON.stringify(external))
+  await user.click(screen.getByRole('button', { name: 'Submit customer identity reconciliation' }))
+  expect(screen.getByRole('status')).toHaveTextContent('changed')
+  expect(screen.getByRole('status')).toHaveFocus()
+  await user.click(screen.getByRole('button', { name: 'RECALL-SEAL-B88' }))
+  expect(screen.getByLabelText('Identity linkage evidence')).toHaveValue('')
+  await user.click(screen.getByRole('button', { name: 'RECALL-SHAFT-A03' }))
+  expect(screen.getByLabelText('Identity linkage evidence')).toHaveValue('SIGNED-ALIAS-CUSTOMER-LINK')
+  await user.click(screen.getByRole('button', { name: 'Refresh effectiveness review' }))
+  await user.click(screen.getByRole('button', { name: 'Submit customer identity reconciliation' }))
+  expect(screen.getByRole('status')).toHaveTextContent('submitted')
+  cleanup(); localStorage.clear()
+})
+
+it('keeps original customer duplicate protection after accepted reconciliation in an incomplete population', () => {
+  const state = sourcedLegacyReceipt()
+  const recall = state.recalls.find((item) => item.recallId === 'RECALL-SHAFT-A03'); if (recall) recall.customerCount = 2
+  const proposal = proposeRecallCustomerIdentity(state, identityProposalCommand(state))
+  const accepted = reviewRecallCustomerIdentity(proposal, { id: 'review', expectedRevision: proposal.revision, authority: 'Quality Director', identityProposalId: 'identity-proposal', decision: 'accepted', evidence: 'VERIFIED-IDENTITY-LINK', reviewer: 'Director', reviewedOn: '2026-10-27' })
+  for (const customerId of ['LEGACY-SHAFT', 'REAL-SHAFT-CUSTOMER']) {
+    expect(() => recordRecallNotification(accepted, { id: 'duplicate', expectedRevision: accepted.revision, authority: 'Quality Director', recallId: 'RECALL-SHAFT-A03', customerId, outcome: 'acknowledged', failureReason: null, actor: 'Receipt desk', attemptedOn: '2026-10-28', retryOf: null })).toThrow('already acknowledged')
+  }
+  expect(accepted.acknowledgements).toHaveLength(1)
+})
+it('refuses repurposing a historical acknowledgement already consumed by disposition evidence', () => {
+  const state = sourcedLegacyReceipt()
+  state.customerDispositions.push({ id: 'prior-site', shipmentSourceId: 'old-line', sourceRevision: 1, acknowledgementId: 'legacy-receipt:ack', repairedUnits: 1, scrappedUnits: 0, releasedUnits: 0, customerEvidence: 'ORIGINAL-CUSTOMER-EVIDENCE', submittedBy: 'Site analyst', submittedOn: '2026-10-25', immutable: true })
+  const original = structuredClone(state)
+  expect(() => proposeRecallCustomerIdentity(state, identityProposalCommand(state))).toThrow('cannot be repurposed')
+  expect(state).toEqual(original)
+})
+
+it('rechecks downstream receipt use and duplicate effective customer identity at acceptance', () => {
+  const state = sourcedLegacyReceipt(); const recall = state.recalls.find((item) => item.recallId === 'RECALL-SHAFT-A03'); if (recall) recall.customerCount = 2
+  const proposal = proposeRecallCustomerIdentity(state, identityProposalCommand(state))
+  const review = { id: 'identity-review', expectedRevision: proposal.revision, authority: 'Quality Director' as const, identityProposalId: 'identity-proposal', decision: 'accepted' as const, evidence: 'DIRECTOR-LINK-REVIEW', reviewer: 'Director', reviewedOn: '2026-10-27' }
+  const consumed = structuredClone(proposal)
+  consumed.customerDispositions.push({ id: 'prior-site', shipmentSourceId: 'old-line', sourceRevision: 1, acknowledgementId: 'legacy-receipt:ack', repairedUnits: 1, scrappedUnits: 0, releasedUnits: 0, customerEvidence: 'PRIOR-CUSTOMER-EVIDENCE', submittedBy: 'Site analyst', submittedOn: '2026-10-25', immutable: true })
+  const original = structuredClone(consumed)
+  expect(() => reviewRecallCustomerIdentity(consumed, review)).toThrow('after proposal')
+  expect(consumed).toEqual(original)
+  const duplicate = recordRecallNotification(proposal, { id: 'real-customer-receipt', expectedRevision: proposal.revision, authority: 'Quality Director', recallId: 'RECALL-SHAFT-A03', customerId: 'REAL-SHAFT-CUSTOMER', outcome: 'acknowledged', failureReason: null, actor: 'Receipt desk', attemptedOn: '2026-10-26', retryOf: null })
+  expect(() => reviewRecallCustomerIdentity(duplicate, { ...review, expectedRevision: duplicate.revision })).toThrow('duplicate coverage')
+  expect(duplicate.identityReviews ?? []).toHaveLength(0)
 })

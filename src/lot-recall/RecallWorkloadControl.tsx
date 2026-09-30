@@ -1,3 +1,4 @@
+import { resolvedRecallAcknowledgements } from './recall-customer-identity';
 import { useRef, useState } from "react";
 import { rankRecallWorkload } from "./recall-portfolio";
 import { FactoryExecutionRepository } from "../factory/execution-control";
@@ -43,6 +44,30 @@ export function RecallWorkloadControl() {
   const updateEffectivenessDraft = (draft: typeof effectivenessDraft) => { setEffectivenessDrafts((current) => ({ ...current, [selectedRecall]: draft })); };
   const effectivenessCoverage = getRecallEffectivenessCoverage(state, selectedRecall);
   const customerIdentityCoverage = getRecallCustomerIdentityCoverage(state, selectedRecall);
+  const [identityDrafts, setIdentityDrafts] = useState<Record<string, { ack: string; source: string; evidence: string; review: string }>>({});
+  const identityDraft = identityDrafts[selectedRecall] ?? { ack: '', source: '', evidence: '', review: '' };
+  const updateIdentityDraft = (draft: typeof identityDraft) => { setIdentityDrafts((current) => ({ ...current, [selectedRecall]: draft })); };
+  const legacyReceipts = state.acknowledgements.filter((item) => item.recallId === selectedRecall && item.identityBasis !== 'reviewed shipment');
+  const pendingIdentity = (state.identityProposals ?? []).find((item) => item.recallId === selectedRecall && !(state.identityReviews ?? []).some((review) => review.proposalId === item.id));
+  const reconcileIdentity = () => {
+    const source = state.shipmentSources.find((item) => item.id === identityDraft.source);
+    try {
+      setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority,
+        acknowledgementId: identityDraft.ack, shipmentSourceId: identityDraft.source, sourceRevision: source?.sourceRevision ?? -1,
+        evidence: identityDraft.evidence, submittedBy: 'Traceability analyst', submittedOn: '2026-10-26' }));
+      setMessage('Customer identity reconciliation submitted; original receipt retained pending independent review.');
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Identity submission failed.'); }
+    queueMicrotask(() => feedback.current?.focus());
+  };
+  const reviewIdentity = (decision: 'accepted' | 'returned') => {
+    if (!pendingIdentity) return;
+    try {
+      setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority,
+        identityProposalId: pendingIdentity.id, decision, evidence: identityDraft.review, reviewer: 'Quality director', reviewedOn: '2026-10-27' }));
+      setMessage(decision === 'accepted' ? 'Verified customer identity now governs recovery; original receipt is unchanged.' : 'Identity proposal returned; receipt and source evidence preserved.');
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Identity review failed.'); }
+    queueMicrotask(() => feedback.current?.focus());
+  };
   const [shipmentDraft, setShipmentDraft] = useState({ shipment: 'SHIP-77', line: 'LINE-1', customer: 'CUSTOMER-1', units: '20', source: 'DESPATCH-MANIFEST-77' });
   const [legacyReference, setLegacyReference] = useState('HISTORICAL-SHIPMENT-ATTESTATION-77');
   const [legacyEvidence, setLegacyEvidence] = useState('Original signed dispatch line and customer receipt inspected.');
@@ -80,9 +105,9 @@ export function RecallWorkloadControl() {
 
   const pendingCustomerDisposition = customerRecovery?.customerDispositions.find((item) => !state.customerDispositionReviews.some((review) => review.dispositionId === item.id));
 
-  const submitCustomerDisposition = () => { if (!customerRecovery) return; try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, shipmentSourceId: customerRecovery.source.id, repairedUnits: Number(customerDraft.repaired), scrappedUnits: Number(customerDraft.scrapped), releasedUnits: Number(customerDraft.released), customerEvidence: customerDraft.evidence, submittedBy: 'Traceability analyst', submittedOn: '2026-10-24' })); setMessage('Customer-site disposition submitted; units remain unresolved until independent approval.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Customer disposition failed.'); } queueMicrotask(() => feedback.current?.focus()); };
+  const submitCustomerDisposition = () => { if (!customerRecovery) return; try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, shipmentSourceId: customerRecovery.source.id, repairedUnits: Number(customerDraft.repaired), scrappedUnits: Number(customerDraft.scrapped), releasedUnits: Number(customerDraft.released), customerEvidence: customerDraft.evidence, submittedBy: 'Traceability analyst', submittedOn: earliestEffectivenessDate > '2026-10-24' ? earliestEffectivenessDate : '2026-10-24' })); setMessage('Customer-site disposition submitted; units remain unresolved until independent approval.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Customer disposition failed.'); } queueMicrotask(() => feedback.current?.focus()); };
 
-  const reviewCustomerDisposition = (decision: 'accepted' | 'returned') => { if (!pendingCustomerDisposition) return; try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, customerDispositionId: pendingCustomerDisposition.id, decision, reviewEvidence: customerReviewEvidence, reviewer: 'Quality director', reviewedOn: '2026-10-25' })); setMessage(decision === 'accepted' ? 'Customer-site evidence accepted; unresolved units reduced without inventing return custody.' : 'Customer-site evidence returned; the original proposal remains historical.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Customer disposition review failed.'); } queueMicrotask(() => feedback.current?.focus()); };
+  const reviewCustomerDisposition = (decision: 'accepted' | 'returned') => { if (!pendingCustomerDisposition) return; try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, customerDispositionId: pendingCustomerDisposition.id, decision, reviewEvidence: customerReviewEvidence, reviewer: 'Quality director', reviewedOn: pendingCustomerDisposition.submittedOn > '2026-10-25' ? pendingCustomerDisposition.submittedOn : '2026-10-25' })); setMessage(decision === 'accepted' ? 'Customer-site evidence accepted; unresolved units reduced without inventing return custody.' : 'Customer-site evidence returned; the original proposal remains historical.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Customer disposition review failed.'); } queueMicrotask(() => feedback.current?.focus()); };
 
   const returnProcessing = getRecallReturnProcessing(state, selectedRecall);
   const selectedReturn = returnProcessing.find((item) => item.receipt.id === selectedReturnId) ?? returnProcessing.find((item) => item.heldUnits > 0) ?? returnProcessing.at(-1);
@@ -263,6 +288,17 @@ export function RecallWorkloadControl() {
       >
         Record customer acknowledgements
       </button>
+      <section aria-label="Customer identity reconciliation">
+        <h3>Resolve legacy customer identity</h3>
+        <p>Reconcile a historical receipt with a reviewed shipment customer. An independent decision changes recovery identity without rewriting the receipt.</p>
+        <label>Legacy customer receipt<select value={identityDraft.ack} onChange={(event) => { updateIdentityDraft({ ...identityDraft, ack: event.target.value }); }}><option value="">Select receipt</option>{legacyReceipts.map((item) => <option key={item.id} value={item.id}>{item.customerId} · {item.acknowledgedOn}</option>)}</select></label>
+        <label>Authoritative customer shipment<select value={identityDraft.source} onChange={(event) => { updateIdentityDraft({ ...identityDraft, source: event.target.value }); }}><option value="">Select reviewed source</option>{customerIdentityCoverage?.sources.map((item) => <option key={item.id} value={item.id}>{item.customerId} · {item.shipmentReference} / {item.lineReference} · revision {item.sourceRevision}</option>)}</select></label>
+        <label>Identity linkage evidence<input value={identityDraft.evidence} onChange={(event) => { updateIdentityDraft({ ...identityDraft, evidence: event.target.value }); }} /></label>
+        <button disabled={authority !== 'Quality Analyst' || Boolean(pendingIdentity) || Boolean(selectedClosure)} onClick={reconcileIdentity}>Submit customer identity reconciliation</button>
+        {pendingIdentity && <><p>Pending: {pendingIdentity.originalCustomerId} → {pendingIdentity.customerId} · source revision {pendingIdentity.sourceRevision}</p><label>Identity review evidence<input value={identityDraft.review} onChange={(event) => { updateIdentityDraft({ ...identityDraft, review: event.target.value }); }} /></label><button disabled={authority !== 'Quality Director'} onClick={() => { reviewIdentity('accepted'); }}>Accept customer identity</button><button disabled={authority !== 'Quality Director'} onClick={() => { reviewIdentity('returned'); }}>Return customer identity</button></>}
+        <p aria-label="Effective customer receipts">{resolvedRecallAcknowledgements(state).filter((item) => item.recallId === selectedRecall).map((item) => item.customerId).join(', ') || 'No customer receipts'}</p>
+        <details><summary>Customer identity decisions</summary><ol>{(state.identityProposals ?? []).filter((item) => item.recallId === selectedRecall).map((item) => <li key={item.id}>{item.originalCustomerId} → {item.customerId} · {item.evidence} · {(state.identityReviews ?? []).find((review) => review.proposalId === item.id)?.decision ?? 'pending'}</li>)}</ol></details>
+      </section>
       <section aria-label="Selected recall effectiveness"><h3>{selectedRecall} final review</h3><p aria-label="Effectiveness category coverage">Population {selectedRecord.tracedUnits} · evidence repaired {effectivenessCoverage?.repairedUnits ?? 0}, scrapped {effectivenessCoverage?.scrappedUnits ?? 0}, released {effectivenessCoverage?.releasedUnits ?? 0} · unclassified {effectivenessCoverage?.unclassifiedUnits ?? 0} · acknowledged {effectivenessCoverage?.acknowledgedCustomers ?? 0}/{selectedRecord.customerCount}</p>
       {!selectedAssignment && !selectedClosure && <fieldset><legend>Prepare governed review</legend><label>Effectiveness review owner<input value={effectivenessDraft.owner} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, owner: event.target.value }); }} /></label><label>Effectiveness review date<input type="date" value={effectivenessDraft.reviewOn} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, reviewOn: event.target.value }); }} /></label><label>Effectiveness review reason<textarea value={effectivenessDraft.reason} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, reason: event.target.value }); }} /></label><button disabled={authority !== 'Quality Director'} onClick={prepareReview}>Prepare selected recall review</button></fieldset>}
       <p aria-label="Affected customer identity coverage">Reviewed shipment customer identities: {customerIdentityCoverage?.customerIds.length ? customerIdentityCoverage.customerIds.join(', ') : 'not yet available'} · {customerIdentityCoverage?.unresolvedIdentities ?? 0} identities unresolved. {customerIdentityCoverage?.populationConflict ? 'Shipment customers exceed the declared population; reconcile before closure.' : customerIdentityCoverage?.complete ? 'Named acknowledgements must match these identities.' : 'Unknown legacy customers remain operator-attributed; no shipment identity is inferred.'}</p><label>Effectiveness customer ID<input value={effectivenessDraft.customerId} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, customerId: event.target.value }); }} /></label><button disabled={authority !== 'Quality Director' || !selectedAssignment || Boolean(selectedClosure)} onClick={acknowledgeCustomer}>Record selected customer acknowledgement</button>
