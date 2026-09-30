@@ -10,10 +10,10 @@ export function reconcileRecallDisposition(tracedUnits: number, repairedUnits: n
   const dispositionTotal = repairedUnits + scrappedUnits + releasedUnits
   return { tracedUnits, dispositionTotal, balanced: dispositionTotal === tracedUnits, variance: tracedUnits - dispositionTotal } as const
 }
-export interface RecallAssignmentEvent { id: string; recallId: string; fromOwner: string; toOwner: string; reviewOn: string; reason: string; tracedPopulation: number; immutable: true }
+export interface RecallAssignmentEvent { id: string; recallId: string; fromOwner: string; toOwner: string; reviewOn: string; reason: string; tracedPopulation: number; preparedBy?: string; immutable: true }
 export interface RecallClosure { id: string; recallId: string; assignmentId: string; customerAcknowledgements: number; repairedUnits: number; scrappedUnits: number; releasedUnits: number; genealogyEvidence: string; determination: 'effective' | 'unsuccessful'; decidedBy: string; decidedOn: string; immutable: true }
 export interface RecallNotificationAttempt { id: string; recallId: string; customerId: string; shipmentReference: string; lotReference: string; unitReferences: string[]; recallRevision: number; action: 'recall-notification'; outcome: 'failed' | 'acknowledged'; failureReason: string | null; actor: string; attemptedOn: string; retryOf: string | null; immutable: true }
-export interface RecallCustomerAcknowledgement { id: string; recallId: string; customerId: string; notificationAttemptId: string; acknowledgedBy: string; acknowledgedOn: string; recallRevision: number; immutable: true }
+export interface RecallCustomerAcknowledgement { identityBasis?: 'reviewed shipment' | 'operator attributed'; customerSources?: { id: string; sourceRevision: number }[]; id: string; recallId: string; customerId: string; notificationAttemptId: string; acknowledgedBy: string; acknowledgedOn: string; recallRevision: number; immutable: true }
 export interface RecallUnitDisposition { id: string; recallId: string; repairedUnits: number; scrappedUnits: number; releasedUnits: number; genealogyEvidence: string; decidedOn: string; effectivenessDecisionId: string; immutable: true }
 export interface RecallShipmentSource { id: string; recallId: string; shipmentReference: string; lineReference: string; customerId: string; lotReference: string; affectedUnits: number; sourceDocument: string; legacyAttestation?: string; recordedBy: string; sourceRevision: number; immutable: true }
 export interface LegacyShipmentReview { id: string; shipmentSourceId: string; sourceRevision: number; decision: 'accepted' | 'rejected'; supportingEvidence: string; reviewer: string; reviewedOn: string; immutable: true }
@@ -276,6 +276,86 @@ export function reviewCustomerRecallDisposition(state: RecallPortfolioState, com
   return next
 }
 
+export function prepareRecallEffectivenessReview(state: RecallPortfolioState, command: {
+  id: string; expectedRevision: number; authority: RecallAuthority; recallId: string;
+  reviewPreparation: true; toOwner: string; reviewOn: string; asOf: string; reason: string; preparedBy: string;
+}) {
+  if (state.assignmentHistory.some((item) => item.id === command.id)) return state
+  if (state.revision !== command.expectedRevision) {
+    throw new RecallControlError('STALE_REVISION', 'Recall workload changed. Refresh before preparing review.')
+  }
+  if (command.authority !== 'Quality Director') {
+    throw new RecallControlError('UNAUTHORIZED', 'Only the quality director can prepare effectiveness review.')
+  }
+  const recall = state.recalls.find((item) => item.recallId === command.recallId)
+  const closed = state.closures.some((item) => item.recallId === command.recallId)
+  const prepared = state.assignmentHistory.some((item) => item.recallId === command.recallId)
+  if (!recall || closed || prepared) {
+    throw new Error('An open recall without an existing governed review is required.')
+  }
+  const date = new Date(command.reviewOn + 'T00:00:00Z')
+  const asOfDate = new Date(command.asOf + 'T00:00:00Z')
+  const validAsOf = /^20\d{2}-\d{2}-\d{2}$/.test(command.asOf)
+    && Number.isFinite(asOfDate.getTime()) && asOfDate.toISOString().slice(0, 10) === command.asOf
+  const validDate = /^20\d{2}-\d{2}-\d{2}$/.test(command.reviewOn)
+    && Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === command.reviewOn
+  if (!command.id.trim() || !command.toOwner.trim() || !command.preparedBy.trim()
+    || command.reason.trim().length < 20 || !validDate || !validAsOf || command.reviewOn <= command.asOf) {
+    throw new Error('Named review ownership, specific reason and valid future review date are required.')
+  }
+  const activeOwnerRecalls = state.recalls.filter((item) => item.recallId !== recall.recallId
+    && item.owner === command.toOwner.trim() && item.recoveredUnits < item.tracedUnits)
+  if (activeOwnerRecalls.length >= recallCapacityPolicy.maximumActiveRecalls) {
+    throw new Error('Selected owner has no active recall capacity.')
+  }
+  const next = structuredClone(state)
+  const target = next.recalls.find((item) => item.recallId === recall.recallId)
+  if (!target) throw new Error('Recall disappeared during review preparation.')
+  next.assignmentHistory.push({
+    id: command.id, recallId: recall.recallId, fromOwner: recall.owner, toOwner: command.toOwner.trim(),
+    reviewOn: command.reviewOn, reason: command.reason.trim(), preparedBy: command.preparedBy.trim(),
+    tracedPopulation: recall.tracedUnits, immutable: true,
+  })
+  target.owner = command.toOwner.trim()
+  next.revision += 1
+  return next
+}
+
+export function getRecallEffectivenessCoverage(state: RecallPortfolioState, recallId: string) {
+  const recall = state.recalls.find((item) => item.recallId === recallId)
+  if (!recall) return null
+  const returns = getRecallReturnProcessing(state, recallId)
+  const shipments = getRecallShipmentRecovery(state, recallId).filter((item) => !rejectedLegacySource(state, item.source))
+  const residual = state.residualDispositions.filter((item) => item.recallId === recallId
+    && state.residualReviews.some((review) => review.dispositionId === item.id && review.decision === 'accepted'))
+  const repairedUnits = returns.reduce((sum, item) => sum + item.repairedUnits, 0)
+    + shipments.reduce((sum, item) => sum + item.customerRepairedUnits, 0)
+  const scrappedUnits = returns.reduce((sum, item) => sum + item.scrappedUnits, 0)
+    + shipments.reduce((sum, item) => sum + item.customerScrappedUnits, 0)
+    + residual.filter((item) => item.kind === 'scrap').reduce((sum, item) => sum + item.units, 0)
+  const releasedUnits = returns.reduce((sum, item) => sum + item.releasedUnits, 0)
+    + shipments.reduce((sum, item) => sum + item.customerReleasedUnits, 0)
+    + residual.filter((item) => item.kind === 'internal use').reduce((sum, item) => sum + item.units, 0)
+  return {
+    repairedUnits, scrappedUnits, releasedUnits,
+    unclassifiedUnits: recall.tracedUnits - repairedUnits - scrappedUnits - releasedUnits,
+    acknowledgedCustomers: new Set(state.acknowledgements.filter((item) => item.recallId === recallId).map((item) => item.customerId)).size,
+  }
+}
+
+
+export function getRecallCustomerIdentityCoverage(state: RecallPortfolioState, recallId: string) {
+  const recall = state.recalls.find((item) => item.recallId === recallId)
+  if (!recall) return null
+  const sources = state.shipmentSources.filter((source) => source.recallId === recallId && reviewedLegacySource(state, source))
+  const customerIds = [...new Set(sources.map((source) => source.customerId))].sort()
+  return {
+    customerIds, sources, unresolvedIdentities: Math.max(0, recall.customerCount - customerIds.length),
+    complete: customerIds.length === recall.customerCount,
+    populationConflict: customerIds.length > recall.customerCount,
+  }
+}
+
 interface ReassignRecallCommand { id: string; expectedRevision: number; authority: RecallAuthority; recallId: string; toOwner: string; reviewOn: string; asOf: string; reason: string }
 
 export function reassignCriticalRecall(state: RecallPortfolioState, command: ReassignRecallCommand) {
@@ -305,6 +385,10 @@ export function recordRecallNotification(state: RecallPortfolioState, command: R
   if (command.authority !== 'Quality Director') throw new RecallControlError('UNAUTHORIZED', 'Only the quality director can record consequential recall notification.')
   const recall = state.recalls.find((item) => item.recallId === command.recallId)
   if (!recall) throw new Error('Recall was not found.')
+  if (!command.customerId.trim() || state.closures.some((item) => item.recallId === command.recallId)) throw new Error('A named affected customer and open recall are required.')
+  const identities = getRecallCustomerIdentityCoverage(state, command.recallId)
+  if (identities?.populationConflict || (identities?.complete && !identities.customerIds.includes(command.customerId.trim()))) throw new Error('Named customer must belong to the authoritative affected shipment population.')
+  if (command.outcome === 'acknowledged' && new Set(state.acknowledgements.filter((item) => item.recallId === command.recallId).map((item) => item.customerId)).size >= recall.customerCount) throw new Error('The declared affected customer population is already acknowledged.')
   if (state.notificationAttempts.some((item) => item.recallId === command.recallId && item.customerId === command.customerId && item.outcome === 'acknowledged')) throw new Error('Customer already acknowledged this recall.')
   if (command.retryOf) {
     const previous = state.notificationAttempts.find((item) => item.id === command.retryOf)
@@ -313,7 +397,7 @@ export function recordRecallNotification(state: RecallPortfolioState, command: R
   if (command.outcome === 'failed' && !command.failureReason) throw new Error('Failed notification requires a failure reason.')
   const next = structuredClone(state)
   next.notificationAttempts.push({ id: command.id, recallId: command.recallId, customerId: command.customerId, shipmentReference: command.shipmentReference ?? '', lotReference: command.lotReference ?? recall.genealogyReference, unitReferences: [...(command.unitReferences ?? [])], recallRevision: state.revision, action: 'recall-notification', outcome: command.outcome, failureReason: command.failureReason, actor: command.actor, attemptedOn: command.attemptedOn, retryOf: command.retryOf, immutable: true })
-  if (command.outcome === 'acknowledged') next.acknowledgements.push({ id: `${command.id}:ack`, recallId: command.recallId, customerId: command.customerId, notificationAttemptId: command.id, acknowledgedBy: command.actor, acknowledgedOn: command.attemptedOn, recallRevision: state.revision, immutable: true })
+  if (command.outcome === 'acknowledged') next.acknowledgements.push({ id: `${command.id}:ack`, recallId: command.recallId, customerId: command.customerId, notificationAttemptId: command.id, acknowledgedBy: command.actor, acknowledgedOn: command.attemptedOn, recallRevision: state.revision, identityBasis: identities?.customerIds.includes(command.customerId) ? 'reviewed shipment' : 'operator attributed', customerSources: identities?.sources.filter((source) => source.customerId === command.customerId).map((source) => ({ id: source.id, sourceRevision: source.sourceRevision })) ?? [], immutable: true })
   next.revision += 1
   return next
 }
@@ -321,7 +405,8 @@ export function recordRecallNotification(state: RecallPortfolioState, command: R
 export function getRecallEffectivenessEvidenceDate(state: RecallPortfolioState, recallId: string) {
   const shipmentIds = new Set(state.shipmentSources.filter((item) => item.recallId === recallId).map((item) => item.id))
   const proposalIds = new Set(state.customerDispositions.filter((item) => shipmentIds.has(item.shipmentSourceId)).map((item) => item.id))
-  const dates = [...state.returnProcessing.filter((item) => shipmentIds.has(item.shipmentSourceId)).map((item) => item.decidedOn), ...state.customerDispositionReviews.filter((item) => item.decision === 'accepted' && proposalIds.has(item.dispositionId)).map((item) => item.reviewedOn)]
+  const residualIds = new Set(state.residualDispositions.filter((item) => item.recallId === recallId).map((item) => item.id))
+  const dates = [...state.returnProcessing.filter((item) => shipmentIds.has(item.shipmentSourceId)).map((item) => item.decidedOn), ...state.customerDispositionReviews.filter((item) => item.decision === 'accepted' && proposalIds.has(item.dispositionId)).map((item) => item.reviewedOn), ...state.residualReviews.filter((item) => item.decision === 'accepted' && residualIds.has(item.dispositionId)).map((item) => item.reviewedOn)]
   return dates.sort().at(-1) ?? null
 }
 
@@ -333,6 +418,8 @@ export function determineRecallEffectiveness(state: RecallPortfolioState, comman
   const recall = state.recalls.find((item) => item.recallId === command.recallId)
   const assignment = [...state.assignmentHistory].reverse().find((item) => item.recallId === command.recallId)
   if (!recall || !assignment) throw new Error('A governed recall assignment is required before determination.')
+  if (state.closures.some((item) => item.recallId === command.recallId)) throw new Error('This recall already has an immutable effectiveness decision.')
+  if (![command.repairedUnits, command.scrappedUnits, command.releasedUnits].every((value) => Number.isSafeInteger(value) && value >= 0)) throw new RecallControlError('DISPOSITION_MISMATCH', 'Final disposition requires nonnegative whole unit categories.')
   if (state.shipmentSources.some((item) => item.recallId === command.recallId) && !getRecallLineageBalance(state, command.recallId)?.complete) throw new Error('Untraced shipment lineage prevents effective recall closure.')
   const returnedCustody = getRecallReturnProcessing(state, command.recallId)
   if (returnedCustody.some((item) => item.heldUnits !== 0)) throw new Error('Returned units still held require inspected disposition before effectiveness closure.')
@@ -340,7 +427,11 @@ export function determineRecallEffectiveness(state: RecallPortfolioState, comman
   const shipmentRecovery = getRecallShipmentRecovery(state, command.recallId).filter((item) => !rejectedLegacySource(state, item.source))
   if (shipmentRecovery.some((item) => item.outstandingUnits !== 0 || item.customerDispositions.some((proposal) => !state.customerDispositionReviews.some((review) => review.dispositionId === proposal.id)))) throw new Error('Unresolved customer shipment units or pending on-site review prevent effectiveness closure.')
   if (shipmentRecovery.reduce((sum, item) => sum + item.customerRepairedUnits, 0) + returnedCustody.reduce((sum, item) => sum + item.repairedUnits, 0) > command.repairedUnits || shipmentRecovery.reduce((sum, item) => sum + item.customerScrappedUnits, 0) + returnedCustody.reduce((sum, item) => sum + item.scrappedUnits, 0) > command.scrappedUnits || shipmentRecovery.reduce((sum, item) => sum + item.customerReleasedUnits, 0) + returnedCustody.reduce((sum, item) => sum + item.releasedUnits, 0) > command.releasedUnits) throw new RecallControlError('DISPOSITION_MISMATCH', 'Final effectiveness disposition contradicts accepted customer-site evidence.')
+  const coverage = getRecallEffectivenessCoverage(state, command.recallId)
+  if (!coverage || coverage.unclassifiedUnits < 0 || coverage.repairedUnits > command.repairedUnits || coverage.scrappedUnits > command.scrappedUnits || coverage.releasedUnits > command.releasedUnits) throw new RecallControlError('DISPOSITION_MISMATCH', 'Final categories contradict reviewed physical, customer-site or non-shipped disposition evidence.')
   const acknowledgedCustomers = new Set(state.acknowledgements.filter((item) => item.recallId === command.recallId).map((item) => item.customerId))
+  const customerIdentities = getRecallCustomerIdentityCoverage(state, command.recallId)
+  if (customerIdentities?.populationConflict || (customerIdentities?.complete && [...acknowledgedCustomers].some((id) => !customerIdentities.customerIds.includes(id)))) throw new Error('Acknowledgement identities must reconcile with the authoritative affected shipment population.')
   if (acknowledgedCustomers.size !== recall.customerCount) throw new Error('Every affected customer must have a durable acknowledgement before closure.')
   if (command.customerAcknowledgements !== acknowledgedCustomers.size) throw new RecallControlError('DISPOSITION_MISMATCH', 'The reported acknowledgement count must match the durable customer history.')
   const reconciliation = reconcileRecallDisposition(recall.tracedUnits, command.repairedUnits, command.scrappedUnits, command.releasedUnits)
@@ -503,5 +594,5 @@ export class RecallPortfolioRepository {
   private readonly persistence: RecallAttemptPersistence
   constructor(persistence: RecallAttemptPersistence) { this.persistence = persistence }
   read(): RecallPortfolioState { return this.persistence.load() ?? structuredClone(initialRecallPortfolioState) }
-  dispatch(command: ReassignRecallCommand | RecordRecallNotification | DetermineRecallEffectiveness | Parameters<typeof recordRecallShipmentSource>[1] | Parameters<typeof recordLegacyShipmentAttestation>[1] | Parameters<typeof reviewLegacyShipmentAttestation>[1] | Parameters<typeof recordRecallShipmentReturn>[1] | Parameters<typeof openRecallLineageInvestigation>[1] | Parameters<typeof resolveRecallLineageInvestigation>[1] | Parameters<typeof reviewRecallLineageEvidence>[1] | Parameters<typeof proposeRecallResidualDisposition>[1] | Parameters<typeof reviewRecallResidualDisposition>[1] | Parameters<typeof processReturnedRecallUnits>[1] | Parameters<typeof proposeCustomerRecallDisposition>[1] | Parameters<typeof reviewCustomerRecallDisposition>[1]) { const current = this.read(); const next = 'customerDispositionId' in command ? reviewCustomerRecallDisposition(current, command) : 'customerEvidence' in command ? proposeCustomerRecallDisposition(current, command) : 'returnId' in command ? processReturnedRecallUnits(current, command) : 'dispositionId' in command ? reviewRecallResidualDisposition(current, command) : 'investigator' in command ? proposeRecallResidualDisposition(current, command) : 'resolutionId' in command ? reviewRecallLineageEvidence(current, command) : 'shipmentSourceIds' in command ? resolveRecallLineageInvestigation(current, command) : 'evidenceRequired' in command ? openRecallLineageInvestigation(current, command) : 'shipmentSourceId' in command && 'decision' in command ? reviewLegacyShipmentAttestation(current, command) : 'shipmentSourceId' in command ? recordRecallShipmentReturn(current, command) : 'attestationReference' in command ? recordLegacyShipmentAttestation(current, command) : 'sourceDocument' in command ? recordRecallShipmentSource(current, command) : 'customerId' in command ? recordRecallNotification(current, command) : 'determination' in command ? determineRecallEffectiveness(current, command) : reassignCriticalRecall(current, command); if (next !== current) this.persistence.save(next); return next }
+  dispatch(command: ReassignRecallCommand | RecordRecallNotification | DetermineRecallEffectiveness | Parameters<typeof recordRecallShipmentSource>[1] | Parameters<typeof recordLegacyShipmentAttestation>[1] | Parameters<typeof reviewLegacyShipmentAttestation>[1] | Parameters<typeof recordRecallShipmentReturn>[1] | Parameters<typeof openRecallLineageInvestigation>[1] | Parameters<typeof resolveRecallLineageInvestigation>[1] | Parameters<typeof reviewRecallLineageEvidence>[1] | Parameters<typeof proposeRecallResidualDisposition>[1] | Parameters<typeof reviewRecallResidualDisposition>[1] | Parameters<typeof processReturnedRecallUnits>[1] | Parameters<typeof proposeCustomerRecallDisposition>[1] | Parameters<typeof reviewCustomerRecallDisposition>[1] | Parameters<typeof prepareRecallEffectivenessReview>[1]) { const current = this.read(); const next = 'reviewPreparation' in command ? prepareRecallEffectivenessReview(current, command) : 'customerDispositionId' in command ? reviewCustomerRecallDisposition(current, command) : 'customerEvidence' in command ? proposeCustomerRecallDisposition(current, command) : 'returnId' in command ? processReturnedRecallUnits(current, command) : 'dispositionId' in command ? reviewRecallResidualDisposition(current, command) : 'investigator' in command ? proposeRecallResidualDisposition(current, command) : 'resolutionId' in command ? reviewRecallLineageEvidence(current, command) : 'shipmentSourceIds' in command ? resolveRecallLineageInvestigation(current, command) : 'evidenceRequired' in command ? openRecallLineageInvestigation(current, command) : 'shipmentSourceId' in command && 'decision' in command ? reviewLegacyShipmentAttestation(current, command) : 'shipmentSourceId' in command ? recordRecallShipmentReturn(current, command) : 'attestationReference' in command ? recordLegacyShipmentAttestation(current, command) : 'sourceDocument' in command ? recordRecallShipmentSource(current, command) : 'customerId' in command ? recordRecallNotification(current, command) : 'determination' in command ? determineRecallEffectiveness(current, command) : reassignCriticalRecall(current, command); if (next !== current) this.persistence.save(next); return next }
 }

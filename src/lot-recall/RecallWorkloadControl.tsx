@@ -8,6 +8,8 @@ import {
   getRecallShipmentRecovery,
   getRecallReturnProcessing,
   getRecallEffectivenessEvidenceDate,
+  getRecallEffectivenessCoverage,
+  getRecallCustomerIdentityCoverage,
   getRecallLineageBalance,
   inspectRecallIntegrity,
   BrowserRecallAttemptPersistence,
@@ -31,7 +33,16 @@ export function RecallWorkloadControl() {
   const [recoveryFilter, setRecoveryFilter] = useState<
     "all" | "outstanding" | "failed"
   >("all");
-  const [selectedRecall, setSelectedRecall] = useState("RECALL-SEAL-B88");
+  const [selectedRecall, setSelectedRecall] = useState(() => { const saved = localStorage.getItem('forgeaxis:effectiveness-recall:v1'); return state.recalls.some((item) => item.recallId === saved) ? saved ?? 'RECALL-SEAL-B88' : 'RECALL-SEAL-B88'; });
+  const selectedRecord = state.recalls.find((item) => item.recallId === selectedRecall);
+  if (!selectedRecord) throw new Error('Selected recall source is missing.');
+  const selectedAssignment = state.assignmentHistory.find((item) => item.recallId === selectedRecall);
+  const selectedClosure = state.closures.find((item) => item.recallId === selectedRecall);
+  const [effectivenessDrafts, setEffectivenessDrafts] = useState<Record<string, { repaired: string; scrapped: string; released: string; evidence: string; date: string; owner: string; reviewOn: string; reason: string; customerId: string }>>({});
+  const effectivenessDraft = effectivenessDrafts[selectedRecall] ?? { repaired: selectedRecall === 'RECALL-SEAL-B88' ? '30' : '0', scrapped: selectedRecall === 'RECALL-SEAL-B88' ? '15' : '0', released: '0', evidence: selectedRecall === 'RECALL-SEAL-B88' ? 'GEN-SEAL-B88-FINAL' : '', date: '', owner: selectedRecord.owner, reviewOn: '2026-10-23', reason: '', customerId: '' };
+  const updateEffectivenessDraft = (draft: typeof effectivenessDraft) => { setEffectivenessDrafts((current) => ({ ...current, [selectedRecall]: draft })); };
+  const effectivenessCoverage = getRecallEffectivenessCoverage(state, selectedRecall);
+  const customerIdentityCoverage = getRecallCustomerIdentityCoverage(state, selectedRecall);
   const [shipmentDraft, setShipmentDraft] = useState({ shipment: 'SHIP-77', line: 'LINE-1', customer: 'CUSTOMER-1', units: '20', source: 'DESPATCH-MANIFEST-77' });
   const [legacyReference, setLegacyReference] = useState('HISTORICAL-SHIPMENT-ATTESTATION-77');
   const [legacyEvidence, setLegacyEvidence] = useState('Original signed dispatch line and customer receipt inspected.');
@@ -49,8 +60,7 @@ export function RecallWorkloadControl() {
 
   const customerReviewEvidence = customerDraft.reviewEvidence;
   const setCustomerReviewEvidence = (value: string) => { setCustomerDraft({ ...customerDraft, reviewEvidence: value }); };
-  const [effectivenessDecisionDate, setEffectivenessDecisionDate] = useState('');
-  const earliestEffectivenessDate = getRecallEffectivenessEvidenceDate(state, 'RECALL-SEAL-B88') ?? '2026-10-24';
+  const earliestEffectivenessDate = getRecallEffectivenessEvidenceDate(state, selectedRecall) ?? '2026-10-24';
 
   const feedback = useRef<HTMLParagraphElement>(null);
   const workload = rankRecallWorkload(state.recalls, "2026-10-20");
@@ -100,7 +110,7 @@ export function RecallWorkloadControl() {
           id: crypto.randomUUID(),
           expectedRevision: state.revision,
           authority,
-          recallId: "RECALL-SEAL-B88",
+          recallId: selectedRecall,
           toOwner: "Senior recall cell",
           reviewOn: "2026-10-23",
           asOf: "2026-10-20",
@@ -159,6 +169,8 @@ export function RecallWorkloadControl() {
     }
     queueMicrotask(() => feedback.current?.focus());
   };
+  const prepareReview = () => { try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, recallId: selectedRecall, reviewPreparation: true, toOwner: effectivenessDraft.owner, reviewOn: effectivenessDraft.reviewOn, asOf: '2026-10-20', reason: effectivenessDraft.reason, preparedBy: 'Quality director' })); setMessage('Selected recall effectiveness review prepared with accountable ownership.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Review preparation failed.'); } queueMicrotask(() => feedback.current?.focus()); };
+  const acknowledgeCustomer = () => { try { setState(repository.dispatch({ id: crypto.randomUUID(), expectedRevision: state.revision, authority, recallId: selectedRecall, customerId: effectivenessDraft.customerId.trim(), outcome: 'acknowledged', failureReason: null, actor: 'Recall desk', attemptedOn: '2026-10-22T09:00:00Z', retryOf: null })); setMessage('Named affected customer acknowledgement retained for the selected recall.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Customer acknowledgement failed.'); } queueMicrotask(() => feedback.current?.focus()); };
   const close = () => {
     try {
       setState(
@@ -166,15 +178,15 @@ export function RecallWorkloadControl() {
           id: crypto.randomUUID(),
           expectedRevision: state.revision,
           authority,
-          recallId: "RECALL-SEAL-B88",
-          customerAcknowledgements: 2,
-          repairedUnits: 30,
-          scrappedUnits: 15,
-          releasedUnits: 0,
-          genealogyEvidence: "GEN-SEAL-B88-FINAL",
+          recallId: selectedRecall,
+          customerAcknowledgements: effectivenessCoverage?.acknowledgedCustomers ?? 0,
+          repairedUnits: Number(effectivenessDraft.repaired),
+          scrappedUnits: Number(effectivenessDraft.scrapped),
+          releasedUnits: Number(effectivenessDraft.released),
+          genealogyEvidence: effectivenessDraft.evidence,
           determination: "effective",
           decidedBy: "Quality director",
-          decidedOn: effectivenessDecisionDate || earliestEffectivenessDate,
+          decidedOn: effectivenessDraft.date || earliestEffectivenessDate,
         }),
       );
       setMessage(
@@ -217,7 +229,7 @@ export function RecallWorkloadControl() {
         </select>
       </label>
       <ol aria-label="Filtered recall recovery">
-        {recovery.map((item) => <li key={item.recall.recallId}><button aria-pressed={selectedRecall === item.recall.recallId} onClick={() => { setSelectedRecall(item.recall.recallId); }}>{item.recall.recallId}</button> · {item.outstandingAcknowledgements} acknowledgements outstanding · {item.attempts.length} attempts · {item.dispositions.length ? "physical disposition recorded" : "physical disposition outstanding"}</li>)}
+        {recovery.map((item) => <li key={item.recall.recallId}><button aria-pressed={selectedRecall === item.recall.recallId} onClick={() => { setSelectedRecall(item.recall.recallId); localStorage.setItem('forgeaxis:effectiveness-recall:v1', item.recall.recallId); setSelectedShipmentSourceId(null); setMessage(''); }}>{item.recall.recallId}</button> · {item.outstandingAcknowledgements} acknowledgements outstanding · {item.attempts.length} attempts · {item.dispositions.length ? "physical disposition recorded" : "physical disposition outstanding"}</li>)}
       </ol>
       {drillDown && <section aria-label="Recall operational drill-down"><h3>{drillDown.recallId} operational lineage</h3><p>Genealogy {drillDown.authoritativeGenealogy} · owner {drillDown.owner}</p><p aria-label="Production source linkage">Production source {productionLink?.status ?? "missing"} · lot {productionLink?.lotReference ?? "unknown"} · source revision {productionLink?.sourceRevision ?? "unknown"}{productionLink?.orderId ? ` · order ${productionLink.orderId}` : " · production order unavailable"}{productionLink?.status === "verified" ? ` · input ${productionLink.inputLotId} · ${String(productionLink.producedUnits)} units verified by ${productionLink.verifiedBy}` : ""}</p><button onClick={() => { setExecution(executionRepository.read()); }}>Refresh factory genealogy</button><p>Recovery {drillDown.physicalRecovery.recoveredUnits} of {drillDown.physicalRecovery.tracedUnits} units · effectiveness {drillDown.effectivenessDecision?.determination ?? "open"}</p><ol>{drillDown.shipments.map((item) => <li key={`${item.shipmentReference}:${item.customerId}`}>{item.shipmentReference || 'shipment unlinked'} · customer {item.customerId} · lot {item.lotReference} · units {item.unitReferences.join(", ") || "not serialized"} · {item.notificationOutcome} · {item.acknowledged ? "acknowledged" : "awaiting acknowledgement"}</li>)}</ol></section>}
       <section aria-label="Recall evidence integrity">
@@ -235,7 +247,7 @@ export function RecallWorkloadControl() {
       <section aria-label="Shipment lineage exceptions"><h3>Unresolved shipment lineage</h3><p>{lineageBalance?.affectedUnits ?? 0} affected · {lineageBalance?.tracedShipmentUnits ?? 0} traced through reviewed shipment lines · {lineageBalance?.untracedUnits ?? 0} untraced</p><p>{openLineage ? `Investigation owner ${openLineage.owner} · evidence required ${openLineage.evidenceRequired}` : 'No active lineage investigation'}</p><button disabled={authority !== 'Quality Director' || !lineageBalance?.untracedUnits || Boolean(openLineage)} onClick={investigateLineage}>Assign untraced lineage investigation</button><button disabled={authority !== 'Quality Analyst' || !openLineage || !selectedShipmentSourceId || Boolean(pendingLineage)} onClick={resolveLineage}>Submit investigated shipment linkage</button><button disabled={authority !== 'Quality Director' || !pendingLineage} onClick={() => { reviewLineage('accepted'); }}>Accept investigated linkage</button><button disabled={authority !== 'Quality Director' || !pendingLineage} onClick={() => { reviewLineage('rejected'); }}>Reject investigated linkage</button><ol aria-label="Shipment lineage investigation history">{state.lineageInvestigations.filter((item) => item.recallId === selectedRecall).map((item) => { const resolution = state.lineageResolutions.filter((entry) => entry.investigationId === item.id).at(-1); const review = state.lineageReviews.find((entry) => entry.resolutionId === resolution?.id); return <li key={item.id}>{item.owner} · opened with {item.affectedUnits - item.tracedAtOpening} untraced · {resolution ? `${String(resolution.resolvedUnits)} proposed; ${String(resolution.residualUnits)} residual · ${review?.decision ?? 'awaiting independent review'}` : 'awaiting source-backed proposal'}</li>; })}</ol></section>
       <button
         disabled={
-          authority !== "Quality Director" || state.assignmentHistory.length > 0
+          authority !== "Quality Director" || Boolean(selectedAssignment) || Boolean(selectedClosure) || workload.find((item) => item.recallId === selectedRecall)?.priority !== "critical"
         }
         onClick={reassign}
       >
@@ -244,19 +256,23 @@ export function RecallWorkloadControl() {
       <button
         disabled={
           authority !== "Quality Director" ||
-          state.assignmentHistory.length === 0 ||
-          state.notificationAttempts.length > 0
+          !selectedAssignment ||
+          selectedRecall !== "RECALL-SEAL-B88" || state.notificationAttempts.some((item) => item.recallId === selectedRecall) || Boolean(selectedClosure)
         }
         onClick={notify}
       >
         Record customer acknowledgements
       </button>
-      <label>Final recall decision date<input type="date" value={effectivenessDecisionDate || earliestEffectivenessDate} onChange={(event) => { setEffectivenessDecisionDate(event.target.value); }} /></label>
+      <section aria-label="Selected recall effectiveness"><h3>{selectedRecall} final review</h3><p aria-label="Effectiveness category coverage">Population {selectedRecord.tracedUnits} · evidence repaired {effectivenessCoverage?.repairedUnits ?? 0}, scrapped {effectivenessCoverage?.scrappedUnits ?? 0}, released {effectivenessCoverage?.releasedUnits ?? 0} · unclassified {effectivenessCoverage?.unclassifiedUnits ?? 0} · acknowledged {effectivenessCoverage?.acknowledgedCustomers ?? 0}/{selectedRecord.customerCount}</p>
+      {!selectedAssignment && !selectedClosure && <fieldset><legend>Prepare governed review</legend><label>Effectiveness review owner<input value={effectivenessDraft.owner} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, owner: event.target.value }); }} /></label><label>Effectiveness review date<input type="date" value={effectivenessDraft.reviewOn} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, reviewOn: event.target.value }); }} /></label><label>Effectiveness review reason<textarea value={effectivenessDraft.reason} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, reason: event.target.value }); }} /></label><button disabled={authority !== 'Quality Director'} onClick={prepareReview}>Prepare selected recall review</button></fieldset>}
+      <p aria-label="Affected customer identity coverage">Reviewed shipment customer identities: {customerIdentityCoverage?.customerIds.length ? customerIdentityCoverage.customerIds.join(', ') : 'not yet available'} · {customerIdentityCoverage?.unresolvedIdentities ?? 0} identities unresolved. {customerIdentityCoverage?.populationConflict ? 'Shipment customers exceed the declared population; reconcile before closure.' : customerIdentityCoverage?.complete ? 'Named acknowledgements must match these identities.' : 'Unknown legacy customers remain operator-attributed; no shipment identity is inferred.'}</p><label>Effectiveness customer ID<input value={effectivenessDraft.customerId} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, customerId: event.target.value }); }} /></label><button disabled={authority !== 'Quality Director' || !selectedAssignment || Boolean(selectedClosure)} onClick={acknowledgeCustomer}>Record selected customer acknowledgement</button>
+      <label>Final repaired units<input inputMode="numeric" value={effectivenessDraft.repaired} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, repaired: event.target.value }); }} /></label><label>Final scrapped units<input inputMode="numeric" value={effectivenessDraft.scrapped} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, scrapped: event.target.value }); }} /></label><label>Final released units<input inputMode="numeric" value={effectivenessDraft.released} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, released: event.target.value }); }} /></label><label>Final genealogy evidence<input value={effectivenessDraft.evidence} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, evidence: event.target.value }); }} /></label>
+      <label>Final recall decision date<input type="date" value={effectivenessDraft.date || earliestEffectivenessDate} onChange={(event) => { updateEffectivenessDraft({ ...effectivenessDraft, date: event.target.value }); }} /></label><button onClick={() => { setState(repository.read()); setMessage('Current recall sources refreshed; selected review draft preserved.'); }}>Refresh effectiveness review</button></section>
       <button
         disabled={
           authority !== "Quality Director" ||
-          state.acknowledgements.length < 2 ||
-          state.closures.length > 0
+          !selectedAssignment ||
+          Boolean(selectedClosure)
         }
         onClick={close}
       >
@@ -268,7 +284,7 @@ export function RecallWorkloadControl() {
         </p>
       )}
       <ol aria-label="Recall notification history">
-        {state.notificationAttempts.map((item) => (
+        {state.notificationAttempts.filter((item) => item.recallId === selectedRecall).map((item) => (
           <li key={item.id}>
             {item.customerId} · {item.outcome} · attempt revision{" "}
             {item.recallRevision}
@@ -276,15 +292,15 @@ export function RecallWorkloadControl() {
         ))}
       </ol>
       <ol aria-label="Recall acknowledgement history">
-        {state.acknowledgements.map((item) => (
+        {state.acknowledgements.filter((item) => item.recallId === selectedRecall).map((item) => (
           <li key={item.id}>
             {item.customerId} · acknowledged by {item.acknowledgedBy} ·
-            notification {item.notificationAttemptId}
+            notification {item.notificationAttemptId} · identity {item.identityBasis ?? 'legacy attribution not recorded'}
           </li>
         ))}
       </ol>
       <ol aria-label="Recall assignment history">
-        {state.assignmentHistory.map((item) => (
+        {state.assignmentHistory.filter((item) => item.recallId === selectedRecall).map((item) => (
           <li key={item.id}>
             {item.recallId} · {item.fromOwner} to {item.toOwner} · review{" "}
             {item.reviewOn} · population {item.tracedPopulation}
@@ -292,7 +308,7 @@ export function RecallWorkloadControl() {
         ))}
       </ol>
       <ol aria-label="Recall closure history">
-        {state.closures.map((item) => (
+        {state.closures.filter((item) => item.recallId === selectedRecall).map((item) => (
           <li key={item.id}>
             {item.recallId} · {item.determination} · repaired{" "}
             {item.repairedUnits} · scrapped {item.scrappedUnits} · genealogy{" "}

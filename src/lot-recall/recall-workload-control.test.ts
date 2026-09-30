@@ -3,7 +3,7 @@ import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { RecallWorkloadControl } from './RecallWorkloadControl'
 import { describe, expect, it } from 'vitest'
-import { proposeCustomerRecallDisposition, reviewCustomerRecallDisposition, getRecallReturnProcessing, processReturnedRecallUnits, browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallLineageBalance, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, inspectRecallIntegrity, openRecallLineageInvestigation, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource, resolveRecallLineageInvestigation, reviewRecallLineageEvidence } from './recall-control-domain'
+import { prepareRecallEffectivenessReview, getRecallCustomerIdentityCoverage, getRecallEffectivenessCoverage, proposeCustomerRecallDisposition, reviewCustomerRecallDisposition, getRecallReturnProcessing, processReturnedRecallUnits, browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallLineageBalance, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, inspectRecallIntegrity, openRecallLineageInvestigation, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource, resolveRecallLineageInvestigation, reviewRecallLineageEvidence } from './recall-control-domain'
 
 it('resolves only source-backed recall lineage and preserves residual quantity and original investigation', () => {
   const opened = openRecallLineageInvestigation(initialRecallPortfolioState, { id: 'investigate-1', expectedRevision: 0, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', conflictingShipmentReference: 'SHIP-UNKNOWN', owner: 'Traceability analyst', evidenceRequired: 'Original dispatch manifest and customer shipment line', openedOn: '2026-10-22' })
@@ -274,4 +274,111 @@ it('preserves shipment-scoped customer disposition evidence through stale refres
   expect(screen.getByLabelText('Customer-site unit reconciliation')).toHaveTextContent('controlled at customer 0 + unresolved 25')
   cleanup()
   localStorage.clear()
+})
+
+
+it('prepares noncritical recalls for governed review without altering another product recall', () => {
+  const command = { id: 'valve-review', expectedRevision: 0, authority: 'Quality Director' as const, recallId: 'RECALL-VALVE-C14', reviewPreparation: true as const, toOwner: 'Valve quality cell', reviewOn: '2026-10-23', asOf: '2026-10-20', reason: 'Review actual repair, scrap and release evidence for the valve recall.', preparedBy: 'independent director' }
+  const before = structuredClone(initialRecallPortfolioState)
+  expect(() => prepareRecallEffectivenessReview(before, { ...command, authority: 'Quality Analyst' })).toThrow('quality director')
+  expect(() => prepareRecallEffectivenessReview(before, { ...command, reviewOn: '2026-11-31' })).toThrow('valid future')
+  expect(() => prepareRecallEffectivenessReview(before, { ...command, asOf: '2026-02-30' })).toThrow('valid future')
+  expect(() => prepareRecallEffectivenessReview(before, { ...command, reason: '' })).toThrow('specific reason')
+  expect(before).toEqual(initialRecallPortfolioState)
+  const prepared = prepareRecallEffectivenessReview(before, command)
+  expect(prepared.assignmentHistory[0]).toMatchObject({ recallId: 'RECALL-VALVE-C14', tracedPopulation: 80, preparedBy: 'independent director', immutable: true })
+  expect(prepared.recalls[0]).toEqual(before.recalls[0])
+  expect(() => prepareRecallEffectivenessReview(prepared, { ...command, id: 'duplicate-preparation', expectedRevision: prepared.revision })).toThrow('existing governed review')
+})
+
+it('requires whole final categories and prevents a second immutable decision for the same recall', () => {
+  let state = prepareRecallEffectivenessReview(initialRecallPortfolioState, { id: 'shaft-review', expectedRevision: 0, authority: 'Quality Director', recallId: 'RECALL-SHAFT-A03', reviewPreparation: true, toOwner: 'Machining quality', reviewOn: '2026-10-23', asOf: '2026-10-20', reason: 'Verify actual shaft recall disposition and customer receipt.', preparedBy: 'director' })
+  state = recordRecallNotification(state, { id: 'shaft-ack', expectedRevision: state.revision, authority: 'Quality Director', recallId: 'RECALL-SHAFT-A03', customerId: 'SHAFT-CUSTOMER-1', outcome: 'acknowledged', failureReason: null, actor: 'desk', attemptedOn: '2026-10-22', retryOf: null })
+  const decision = { id: 'shaft-final', expectedRevision: state.revision, authority: 'Quality Director' as const, recallId: 'RECALL-SHAFT-A03', customerAcknowledgements: 1, repairedUnits: 20, scrappedUnits: 5, releasedUnits: 5, genealogyEvidence: 'SHAFT-FINAL-INSPECTION', determination: 'effective' as const, decidedBy: 'director', decidedOn: '2026-10-24' }
+  expect(getRecallEffectivenessCoverage(state, decision.recallId)).toMatchObject({ acknowledgedCustomers: 1, unclassifiedUnits: 30 })
+  const before = structuredClone(state)
+  expect(() => determineRecallEffectiveness(state, { ...decision, repairedUnits: 20.5, scrappedUnits: 4.5 })).toThrow('whole unit')
+  expect(() => determineRecallEffectiveness(state, { ...decision, releasedUnits: 4 })).toThrow('fully reconcile')
+  expect(() => recordRecallNotification(state, { id: 'extra-shaft-ack', expectedRevision: state.revision, authority: 'Quality Director', recallId: decision.recallId, customerId: 'EXTRA-CUSTOMER', outcome: 'acknowledged', failureReason: null, actor: 'desk', attemptedOn: '2026-10-22', retryOf: null })).toThrow('already acknowledged')
+  expect(state).toEqual(before)
+  const closed = determineRecallEffectiveness(state, decision)
+  expect(closed.closures[0]).toMatchObject({ recallId: decision.recallId, repairedUnits: 20, scrappedUnits: 5, releasedUnits: 5 })
+  expect(closed.recalls[0]).toEqual(state.recalls[0])
+  expect(() => determineRecallEffectiveness(closed, { ...decision, id: 'second-final', expectedRevision: closed.revision })).toThrow('immutable effectiveness')
+})
+
+it('preserves selected recall final-review drafts through switching and a stale review recovery', async () => {
+  cleanup(); localStorage.clear()
+  const user = userEvent.setup()
+  render(createElement(RecallWorkloadControl))
+  await user.click(screen.getByRole('button', { name: 'RECALL-SHAFT-A03' }))
+  await user.selectOptions(screen.getByLabelText('Recall portfolio authority'), 'Quality Director')
+  await user.click(screen.getByLabelText('Effectiveness review reason')); await user.paste('Review the shaft customer acknowledgement and inspected actual disposition.')
+  await user.click(screen.getByRole('button', { name: 'Prepare selected recall review' }))
+  expect(screen.getByRole('status')).toHaveTextContent('review prepared')
+  await user.click(screen.getByLabelText('Effectiveness customer ID')); await user.paste('SHAFT-CUSTOMER-1')
+  await user.click(screen.getByRole('button', { name: 'Record selected customer acknowledgement' }))
+  for (const [label, value] of [['Final repaired units', '20'], ['Final scrapped units', '5'], ['Final released units', '4']] as const) { await user.clear(screen.getByLabelText(label)); await user.click(screen.getByLabelText(label)); await user.paste(value); }
+  await user.click(screen.getByLabelText('Final genealogy evidence')); await user.paste('SHAFT-FINAL-INSPECTION')
+  await user.click(screen.getByRole('button', { name: 'Confirm final recall effectiveness' }))
+  expect(screen.getByRole('status')).toHaveTextContent('fully reconcile'); expect(screen.getByRole('status')).toHaveFocus()
+  await user.click(screen.getByRole('button', { name: 'RECALL-SEAL-B88' }))
+  expect(screen.getByLabelText('Final genealogy evidence')).toHaveValue('GEN-SEAL-B88-FINAL')
+  await user.click(screen.getByRole('button', { name: 'RECALL-SHAFT-A03' }))
+  expect(screen.getByLabelText('Final genealogy evidence')).toHaveValue('SHAFT-FINAL-INSPECTION')
+  await user.clear(screen.getByLabelText('Final released units')); await user.type(screen.getByLabelText('Final released units'), '5')
+  const sibling = new BrowserRecallAttemptPersistence(localStorage), current = sibling.load()!
+  sibling.save(prepareRecallEffectivenessReview(current, { id: 'sibling-valve-review', expectedRevision: current.revision, authority: 'Quality Director', recallId: 'RECALL-VALVE-C14', reviewPreparation: true, toOwner: 'Valve quality cell', reviewOn: '2026-10-23', asOf: '2026-10-20', reason: 'Prepare the unrelated valve recall for independent final review.', preparedBy: 'director' }))
+  await user.click(screen.getByRole('button', { name: 'Confirm final recall effectiveness' }))
+  expect(screen.getByRole('status')).toHaveTextContent('changed. Refresh')
+  await user.click(screen.getByRole('button', { name: 'Refresh effectiveness review' }))
+  expect(screen.getByLabelText('Final released units')).toHaveValue('5')
+  await user.click(screen.getByRole('button', { name: 'Confirm final recall effectiveness' }))
+  expect(sibling.load()?.closures).toMatchObject([{ recallId: 'RECALL-SHAFT-A03', repairedUnits: 20, scrappedUnits: 5, releasedUnits: 5 }])
+  cleanup(); localStorage.clear()
+})
+
+
+it('reconciles reviewed non-shipped scrap with customer-site categories before final effectiveness', async () => {
+  const { proposeRecallResidualDisposition, reviewRecallResidualDisposition } = await import('./recall-control-domain')
+  let state = acknowledgedCustomerShipment()
+  state = proposeCustomerRecallDisposition(state, { ...siteProposal, expectedRevision: state.revision, repairedUnits: 20, scrappedUnits: 0, releasedUnits: 0 })
+  state = reviewCustomerRecallDisposition(state, { ...siteReview, expectedRevision: state.revision })
+  state = openRecallLineageInvestigation(state, { id: 'residual-final-investigation', expectedRevision: state.revision, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', conflictingShipmentReference: null, owner: 'analyst', evidenceRequired: 'Actual non-shipped scrap log', openedOn: '2026-10-25' })
+  state = proposeRecallResidualDisposition(state, { id: 'residual-final-scrap', expectedRevision: state.revision, authority: 'Quality Analyst', investigationId: 'residual-final-investigation', kind: 'scrap', units: 25, evidenceReference: 'ACTUAL-SCRAP-25', investigator: 'analyst', proposedOn: '2026-10-25' })
+  state = reviewRecallResidualDisposition(state, { id: 'residual-final-review', expectedRevision: state.revision, authority: 'Quality Director', dispositionId: 'residual-final-scrap', decision: 'accepted', reviewer: 'director', reviewEvidence: 'Scrap quantity and actual lot verified.', reviewedOn: '2026-10-26' })
+  state = prepareRecallEffectivenessReview(state, { id: 'residual-final-preparation', expectedRevision: state.revision, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', reviewPreparation: true, toOwner: 'recall team', reviewOn: '2026-10-26', asOf: '2026-10-20', reason: 'Reconcile customer repair and independently verified non-shipped scrap.', preparedBy: 'director' })
+  state = recordRecallNotification(state, { id: 'residual-final-customer-2', expectedRevision: state.revision, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', customerId: 'CUSTOMER-2', outcome: 'acknowledged', failureReason: null, actor: 'desk', attemptedOn: '2026-10-22', retryOf: null })
+  expect(getRecallEffectivenessCoverage(state, 'RECALL-SEAL-B88')).toMatchObject({ repairedUnits: 20, scrappedUnits: 25, releasedUnits: 0, unclassifiedUnits: 0 })
+  const decision = { id: 'residual-final-close', expectedRevision: state.revision, authority: 'Quality Director' as const, recallId: 'RECALL-SEAL-B88', customerAcknowledgements: 2, repairedUnits: 30, scrappedUnits: 15, releasedUnits: 0, genealogyEvidence: 'ACTUAL-FINAL-COVERAGE', determination: 'effective' as const, decidedBy: 'director', decidedOn: '2026-10-26' }
+  const before = structuredClone(state)
+  expect(() => determineRecallEffectiveness(state, decision)).toThrow('non-shipped disposition evidence')
+  expect(state).toEqual(before)
+  const closed = determineRecallEffectiveness(state, { ...decision, repairedUnits: 20, scrappedUnits: 25 })
+  expect(closed.closures[0]).toMatchObject({ repairedUnits: 20, scrappedUnits: 25 })
+  expect(closed.residualDispositions).toEqual(before.residualDispositions)
+  expect(closed.customerDispositions).toEqual(before.customerDispositions)
+})
+
+it('binds complete customer populations to source identities while preserving explicit unknown legacy attribution', () => {
+  const initial = structuredClone(initialRecallPortfolioState)
+  initial.recalls.find((item) => item.recallId === 'RECALL-SHAFT-A03')!.recoveredUnits = 0
+  const source = recordRecallShipmentSource(initial, { id: 'shaft-authoritative-line', expectedRevision: 0, authority: 'Quality Analyst', recallId: 'RECALL-SHAFT-A03', shipmentReference: 'SHAFT-DISPATCH-33', lineReference: 'SHAFT-LINE-1', customerId: 'SHAFT-REAL-CUSTOMER', lotReference: 'SHAFT-A03', affectedUnits: 30, sourceDocument: 'SHAFT-SIGNED-DISPATCH', recordedBy: 'dispatch' })
+  const notification = { id: 'shaft-source-ack', expectedRevision: source.revision, authority: 'Quality Director' as const, recallId: 'RECALL-SHAFT-A03', customerId: 'UNRELATED-CUSTOMER', outcome: 'acknowledged' as const, failureReason: null, actor: 'desk', attemptedOn: '2026-10-22', retryOf: null }
+  expect(getRecallCustomerIdentityCoverage(source, notification.recallId)).toMatchObject({ complete: true, unresolvedIdentities: 0, customerIds: ['SHAFT-REAL-CUSTOMER'] })
+  const before = structuredClone(source)
+  expect(() => recordRecallNotification(source, notification)).toThrow('authoritative affected shipment population')
+  expect(source).toEqual(before)
+  let accepted = recordRecallNotification(source, { ...notification, customerId: 'SHAFT-REAL-CUSTOMER' })
+  expect(accepted.acknowledgements.at(-1)).toMatchObject({ identityBasis: 'reviewed shipment', customerSources: [{ id: 'shaft-authoritative-line', sourceRevision: 0 }] })
+  accepted = recordRecallShipmentReturn(accepted, { id: 'shaft-full-return', expectedRevision: accepted.revision, authority: 'Quality Director', shipmentSourceId: 'shaft-authoritative-line', returnedUnits: 30, custodyReference: 'SHAFT-RETURN-CUSTODY', receivedBy: 'returns', receivedOn: '2026-10-23' })
+  accepted = processReturnedRecallUnits(accepted, { id: 'shaft-return-inspection', expectedRevision: accepted.revision, authority: 'Quality Director', returnId: 'shaft-full-return', repairedUnits: 30, scrappedUnits: 0, releasedUnits: 0, inspectionEvidence: 'SHAFT-INSPECTED-30', decidedBy: 'independent inspector', decidedOn: '2026-10-24' })
+  accepted = prepareRecallEffectivenessReview(accepted, { id: 'shaft-known-review', expectedRevision: accepted.revision, authority: 'Quality Director', recallId: notification.recallId, reviewPreparation: true, toOwner: 'Shaft recall team', reviewOn: '2026-10-24', asOf: '2026-10-20', reason: 'Review the complete authoritative customer and inspected shaft population.', preparedBy: 'director' })
+  const forgedLegacy = structuredClone(accepted); forgedLegacy.acknowledgements[0]!.customerId = 'UNRELATED-CUSTOMER'
+  const closure = { id: 'shaft-known-final', expectedRevision: accepted.revision, authority: 'Quality Director' as const, recallId: notification.recallId, customerAcknowledgements: 1, repairedUnits: 30, scrappedUnits: 0, releasedUnits: 0, genealogyEvidence: 'SHAFT-FINAL-PROOF', determination: 'effective' as const, decidedBy: 'director', decidedOn: '2026-10-24' }
+  expect(() => determineRecallEffectiveness(forgedLegacy, closure)).toThrow('Acknowledgement identities')
+  expect(determineRecallEffectiveness(accepted, closure).closures.at(-1)?.recallId).toBe(notification.recallId)
+  const legacy = recordRecallNotification(initialRecallPortfolioState, { ...notification, id: 'legacy-shaft-ack', expectedRevision: 0, customerId: 'OPERATOR-IDENTIFIED-LEGACY-CUSTOMER' })
+  expect(legacy.acknowledgements.at(-1)).toMatchObject({ identityBasis: 'operator attributed', customerSources: [] })
+  expect(getRecallCustomerIdentityCoverage(legacy, notification.recallId)?.unresolvedIdentities).toBe(1)
 })
