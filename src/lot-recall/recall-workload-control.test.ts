@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallLineageBalance, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, inspectRecallIntegrity, openRecallLineageInvestigation, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource, resolveRecallLineageInvestigation, reviewRecallLineageEvidence } from './recall-control-domain'
+import { getRecallReturnProcessing, processReturnedRecallUnits, browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallLineageBalance, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, inspectRecallIntegrity, openRecallLineageInvestigation, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource, resolveRecallLineageInvestigation, reviewRecallLineageEvidence } from './recall-control-domain'
 
 it('resolves only source-backed recall lineage and preserves residual quantity and original investigation', () => {
   const opened = openRecallLineageInvestigation(initialRecallPortfolioState, { id: 'investigate-1', expectedRevision: 0, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', conflictingShipmentReference: 'SHIP-UNKNOWN', owner: 'Traceability analyst', evidenceRequired: 'Original dispatch manifest and customer shipment line', openedOn: '2026-10-22' })
@@ -106,4 +106,52 @@ it('reconciles cumulative return custody per shipment without using another line
   expect(inspectRecallIntegrity(state, initialFactoryExecution, 'RECALL-SEAL-B88').filter((item) => item.code === 'RETURN_SOURCE')).toEqual([])
   state.shipmentReturns[1]!.returnedUnits = -1
   expect(inspectRecallIntegrity(state, initialFactoryExecution, 'RECALL-SEAL-B88').some((item) => item.code === 'RETURN_SOURCE')).toBe(true)
+})
+
+function returnedRecallCustody(units = 10) {
+  const source = recordRecallShipmentSource(initialRecallPortfolioState, { id: 'processing-line', expectedRevision: 0, authority: 'Quality Analyst', recallId: 'RECALL-SEAL-B88', shipmentReference: 'SHIP-77', lineReference: 'LINE-1', customerId: 'CUSTOMER-1', lotReference: 'SEAL-B88', affectedUnits: 45, sourceDocument: 'MANIFEST-77', recordedBy: 'analyst' })
+  return recordRecallShipmentReturn(source, { id: 'physical-return', expectedRevision: source.revision, authority: 'Quality Director', shipmentSourceId: 'processing-line', returnedUnits: units, custodyReference: 'CUSTODY-77', receivedBy: 'Recovery desk', receivedOn: '2026-10-23' })
+}
+
+it('partitions physical return custody into inspected repair scrap release and remaining held units', () => {
+  const state = returnedRecallCustody()
+  const processing = { id: 'process-1', expectedRevision: state.revision, authority: 'Quality Director' as const, returnId: 'physical-return', repairedUnits: 5, scrappedUnits: 2, releasedUnits: 0, inspectionEvidence: 'INSPECTION-77', decidedBy: 'Quality director', decidedOn: '2026-10-25' }
+  const before = structuredClone(state)
+  expect(() => processReturnedRecallUnits(state, { ...processing, authority: 'Quality Analyst' })).toThrow('quality director')
+  expect(() => processReturnedRecallUnits(state, { ...processing, expectedRevision: 0 })).toThrow('Refresh')
+  expect(() => processReturnedRecallUnits(state, { ...processing, decidedBy: 'Recovery desk' })).toThrow('Independent')
+  expect(() => processReturnedRecallUnits(state, { ...processing, repairedUnits: 9 })).toThrow('held return quantity')
+  expect(() => processReturnedRecallUnits(state, { ...processing, decidedOn: '2026-10-22' })).toThrow('date after')
+  expect(() => processReturnedRecallUnits(state, { ...processing, decidedOn: '2026-11-31' })).toThrow('date after')
+  expect(state).toEqual(before)
+  const partial = processReturnedRecallUnits(state, processing)
+  expect(getRecallReturnProcessing(partial, 'RECALL-SEAL-B88')[0]).toMatchObject({ repairedUnits: 5, scrappedUnits: 2, releasedUnits: 0, heldUnits: 3 })
+  const complete = processReturnedRecallUnits(partial, { ...processing, id: 'process-2', expectedRevision: partial.revision, repairedUnits: 0, scrappedUnits: 0, releasedUnits: 3 })
+  expect(getRecallReturnProcessing(complete, 'RECALL-SEAL-B88')[0]).toMatchObject({ repairedUnits: 5, scrappedUnits: 2, releasedUnits: 3, heldUnits: 0 })
+  expect(complete.shipmentReturns).toEqual(state.shipmentReturns)
+  expect(complete.returnProcessing[0]).toEqual(partial.returnProcessing[0])
+  expect(processReturnedRecallUnits(complete, { ...processing, id: 'process-2' })).toBe(complete)
+  expect(() => processReturnedRecallUnits(complete, { ...processing, id: 'over-process', expectedRevision: complete.revision, repairedUnits: 1, scrappedUnits: 0 })).toThrow('held return quantity')
+})
+
+it('requires inspected returned-unit disposition before closure and preserves its category totals', () => {
+  let state = returnedRecallCustody()
+  state = reassignCriticalRecall(state, { id: 'processing-assignment', expectedRevision: state.revision, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', toOwner: 'Senior recall cell', reviewOn: '2026-10-22', asOf: '2026-10-20', reason: 'Critical recovery requires independent reviewed disposition.' })
+  for (const [index, customerId] of ['CUSTOMER-1', 'CUSTOMER-2'].entries()) state = recordRecallNotification(state, { id: `processing-notice-${String(index)}`, expectedRevision: state.revision, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', customerId, actor: 'quality', attemptedOn: '2026-10-24', outcome: 'acknowledged', failureReason: null, retryOf: null })
+  const closure = { id: 'processing-close', expectedRevision: state.revision, authority: 'Quality Director' as const, recallId: 'RECALL-SEAL-B88', customerAcknowledgements: 2, repairedUnits: 30, scrappedUnits: 15, releasedUnits: 0, genealogyEvidence: 'GENEALOGY-77', determination: 'effective' as const, decidedBy: 'director', decidedOn: '2026-10-26' }
+  expect(() => determineRecallEffectiveness(state, closure)).toThrow('still held')
+  const processed = processReturnedRecallUnits(state, { id: 'inspected-return', expectedRevision: state.revision, authority: 'Quality Director', returnId: 'physical-return', repairedUnits: 7, scrappedUnits: 3, releasedUnits: 0, inspectionEvidence: 'INSPECT-77', decidedBy: 'Quality director', decidedOn: '2026-10-25' })
+  expect(() => determineRecallEffectiveness(processed, { ...closure, expectedRevision: processed.revision, repairedUnits: 43, scrappedUnits: 2 })).toThrow('contradicts')
+  const closed = determineRecallEffectiveness(processed, { ...closure, expectedRevision: processed.revision })
+  expect(closed.returnProcessing).toEqual(processed.returnProcessing)
+  expect(closed.recalls[0]?.recoveredUnits).toBe(45)
+  expect(() => recordRecallShipmentReturn(closed, { id: 'late-return', expectedRevision: closed.revision, authority: 'Quality Director', shipmentSourceId: 'processing-line', returnedUnits: 1, custodyReference: 'LATE-77', receivedBy: 'Recovery desk', receivedOn: '2026-10-27' })).toThrow('Closed recall')
+})
+
+it('loads legacy returns as held custody without inventing inspected disposition', () => {
+  const state = returnedRecallCustody()
+  const legacy = { ...state, returnProcessing: undefined }
+  const loaded = new BrowserRecallAttemptPersistence({ getItem: () => JSON.stringify(legacy), setItem: () => undefined }).load()
+  expect(loaded?.returnProcessing).toEqual([])
+  expect(getRecallReturnProcessing(loaded!, 'RECALL-SEAL-B88')[0]?.heldUnits).toBe(10)
 })
