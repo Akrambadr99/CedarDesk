@@ -201,3 +201,24 @@ test('legacy shipment attestation remains unresolved until independent source re
 test('reviewed scrap evidence reduces unresolved recall quantity without inventing a shipment',async({page})=>{await page.goto('/lot-recall');const role=page.getByLabel('Recall portfolio authority');await role.selectOption('Quality Director');await page.getByRole('button',{name:'Assign untraced lineage investigation'}).click();await role.selectOption('Quality Analyst');await page.getByLabel('Non-shipped units').fill('10');await page.getByRole('button',{name:'Propose non-shipped disposition'}).click();await expect(page.getByLabel('Recall quantity reconciliation')).toContainText('verified non-shipped 0 + unresolved 45');await role.selectOption('Quality Director');await page.getByRole('button',{name:'Accept non-shipped evidence'}).click();await expect(page.getByLabel('Recall quantity reconciliation')).toContainText('verified non-shipped 10 + unresolved 35');await page.reload();await expect(page.getByRole('list',{name:'Non-shipped disposition history'})).toContainText('scrap · 10 units · SCRAP-LOG-SEAL-B88 · accepted');});
 
 test('recall integrity guidance follows authoritative production genealogy',async({page})=>{await page.goto('/lot-recall');const integrity=page.getByRole('region',{name:'Recall evidence integrity'});await expect(integrity).toContainText('PRODUCTION SOURCE');await expect(integrity).toContainText('factory execution genealogy');await page.goto('/factory-execution');const role=page.getByLabel('Execution role');await page.getByRole('button',{name:'Reserve for work order'}).click();await role.selectOption('Operator');await page.getByRole('button',{name:'Accept staged material'}).click();await page.getByRole('button',{name:'Record consumption'}).click();await role.selectOption('Quality Engineer');await page.getByLabel('Verified output lot').fill('SEAL-B88');await page.getByRole('button',{name:'Verify output genealogy'}).click();await page.goto('/lot-recall');await expect(integrity).toContainText('No integrity conflicts found');});
+
+test('recall integrity exposes cumulative legacy return receipts for the affected shipment', async ({ page }) => {
+  await page.goto('/lot-recall')
+  await page.getByLabel('Recall portfolio authority').selectOption('Quality Director')
+  await page.getByRole('button', { name: 'Assign untraced lineage investigation' }).click()
+  await page.evaluate(() => {
+    const storage = (globalThis as unknown as { localStorage: { getItem(key: string): string | null; setItem(key: string, value: string): void } }).localStorage
+    const raw = storage.getItem('forgeaxis:recall-portfolio:v2')
+    if (!raw) throw new Error('Recall investigation was not persisted')
+    const state = JSON.parse(raw) as { shipmentSources: unknown[]; shipmentReturns: unknown[] }
+    state.shipmentSources.push({ id: 'line-cumulative', recallId: 'RECALL-SEAL-B88', shipmentReference: 'SHIP-77', lineReference: 'LINE-1', customerId: 'CUSTOMER-1', lotReference: 'SEAL-B88', affectedUnits: 20, sourceDocument: 'MANIFEST-77', recordedBy: 'analyst', sourceRevision: 0, immutable: true })
+    state.shipmentReturns.push(...[12, 9].map((returnedUnits, index) => ({ id: `return-${String(index)}`, shipmentSourceId: 'line-cumulative', returnedUnits, custodyReference: `CUSTODY-${String(index)}`, receivedBy: 'director', receivedOn: '2026-10-27', immutable: true })))
+    storage.setItem('forgeaxis:recall-portfolio:v2', JSON.stringify(state))
+  })
+  await page.reload()
+  const integrity = page.getByRole('region', { name: 'Recall evidence integrity' })
+  await expect(integrity).toContainText('21 returned units against 20 affected units')
+  await expect(integrity).toContainText('Reconcile all custody receipts')
+  await page.reload()
+  await expect(integrity).toContainText('line-cumulative')
+})

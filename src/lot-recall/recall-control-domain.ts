@@ -377,9 +377,10 @@ export function inspectRecallIntegrity(state: RecallPortfolioState, execution: F
     const attempt = attemptById.get(acknowledgement.notificationAttemptId)
     if (attempt?.outcome !== 'acknowledged' || attempt.customerId !== acknowledgement.customerId || attempt.recallRevision !== acknowledgement.recallRevision) add('ACKNOWLEDGEMENT', acknowledgement.id, `Acknowledgement ${acknowledgement.id} has no matching successful notification revision.`, 'Find the original notification attempt and verify its customer and recall revision.')
   }
-  for (const returned of state.shipmentReturns) {
-    const source = sourceById.get(returned.shipmentSourceId)
-    if (source && returned.returnedUnits > source.affectedUnits) add('RETURN_SOURCE', returned.id, `Returned-unit custody ${returned.id} exceeds its affected shipment line.`, 'Reconcile the custody receipt against the attested shipment line and affected quantity.')
+  for (const source of sources) {
+    const returns = state.shipmentReturns.filter((item) => item.shipmentSourceId === source.id)
+    const totalReturned = returns.reduce((sum, item) => sum + item.returnedUnits, 0)
+    if (returns.some((item) => !Number.isSafeInteger(item.returnedUnits) || item.returnedUnits <= 0) || totalReturned > source.affectedUnits) add('RETURN_SOURCE', source.id, `Shipment ${source.id} records ${String(totalReturned)} returned units against ${String(source.affectedUnits)} affected units.`, 'Reconcile all custody receipts for this shipment line; each returned unit must be counted once.')
   }
   for (const disposition of state.unitDispositions.filter((item) => item.recallId === recallId)) {
     const total = disposition.repairedUnits + disposition.scrappedUnits + disposition.releasedUnits
