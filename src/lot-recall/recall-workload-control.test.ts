@@ -1,5 +1,9 @@
+import { createElement } from 'react'
+import { cleanup, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { RecallWorkloadControl } from './RecallWorkloadControl'
 import { describe, expect, it } from 'vitest'
-import { getRecallReturnProcessing, processReturnedRecallUnits, browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallLineageBalance, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, inspectRecallIntegrity, openRecallLineageInvestigation, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource, resolveRecallLineageInvestigation, reviewRecallLineageEvidence } from './recall-control-domain'
+import { proposeCustomerRecallDisposition, reviewCustomerRecallDisposition, getRecallReturnProcessing, processReturnedRecallUnits, browseRecallRecovery, BrowserRecallAttemptPersistence, determineRecallEffectiveness, getRecallLineageBalance, getRecallOperationalDrillDown, getRecallProductionLink, getRecallRecoveryTimeline, getRecallShipmentRecovery, initialRecallPortfolioState, inspectRecallIntegrity, openRecallLineageInvestigation, RecallControlError, reassignCriticalRecall, reconcileRecallDisposition, recordRecallNotification, recordRecallShipmentReturn, recordRecallShipmentSource, resolveRecallLineageInvestigation, reviewRecallLineageEvidence } from './recall-control-domain'
 
 it('resolves only source-backed recall lineage and preserves residual quantity and original investigation', () => {
   const opened = openRecallLineageInvestigation(initialRecallPortfolioState, { id: 'investigate-1', expectedRevision: 0, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', conflictingShipmentReference: 'SHIP-UNKNOWN', owner: 'Traceability analyst', evidenceRequired: 'Original dispatch manifest and customer shipment line', openedOn: '2026-10-22' })
@@ -142,7 +146,13 @@ it('requires inspected returned-unit disposition before closure and preserves it
   expect(() => determineRecallEffectiveness(state, closure)).toThrow('still held')
   const processed = processReturnedRecallUnits(state, { id: 'inspected-return', expectedRevision: state.revision, authority: 'Quality Director', returnId: 'physical-return', repairedUnits: 7, scrappedUnits: 3, releasedUnits: 0, inspectionEvidence: 'INSPECT-77', decidedBy: 'Quality director', decidedOn: '2026-10-25' })
   expect(() => determineRecallEffectiveness(processed, { ...closure, expectedRevision: processed.revision, repairedUnits: 43, scrappedUnits: 2 })).toThrow('contradicts')
-  const closed = determineRecallEffectiveness(processed, { ...closure, expectedRevision: processed.revision })
+  expect(() => determineRecallEffectiveness(processed, { ...closure, expectedRevision: processed.revision })).toThrow('Unresolved customer shipment')
+  const proposed = proposeCustomerRecallDisposition(processed, { id: 'processing-customer-disposition', expectedRevision: processed.revision, authority: 'Quality Analyst', shipmentSourceId: 'processing-line', repairedUnits: 23, scrappedUnits: 12, releasedUnits: 0, customerEvidence: 'CUSTOMER-INSPECTION-77', submittedBy: 'analyst', submittedOn: '2026-10-25' })
+  const accepted = reviewCustomerRecallDisposition(proposed, { id: 'processing-customer-review', expectedRevision: proposed.revision, authority: 'Quality Director', customerDispositionId: 'processing-customer-disposition', decision: 'accepted', reviewEvidence: 'SIGNED-CUSTOMER-REVIEW-77', reviewer: 'director', reviewedOn: '2026-10-26' })
+  const beforeClosure = structuredClone(accepted)
+  expect(() => determineRecallEffectiveness(accepted, { ...closure, expectedRevision: accepted.revision, decidedOn: '2026-10-25' })).toThrow('on or after accepted recovery evidence')
+  expect(accepted).toEqual(beforeClosure)
+  const closed = determineRecallEffectiveness(accepted, { ...closure, expectedRevision: accepted.revision })
   expect(closed.returnProcessing).toEqual(processed.returnProcessing)
   expect(closed.recalls[0]?.recoveredUnits).toBe(45)
   expect(() => recordRecallShipmentReturn(closed, { id: 'late-return', expectedRevision: closed.revision, authority: 'Quality Director', shipmentSourceId: 'processing-line', returnedUnits: 1, custodyReference: 'LATE-77', receivedBy: 'Recovery desk', receivedOn: '2026-10-27' })).toThrow('Closed recall')
@@ -154,4 +164,114 @@ it('loads legacy returns as held custody without inventing inspected disposition
   const loaded = new BrowserRecallAttemptPersistence({ getItem: () => JSON.stringify(legacy), setItem: () => undefined }).load()
   expect(loaded?.returnProcessing).toEqual([])
   expect(getRecallReturnProcessing(loaded!, 'RECALL-SEAL-B88')[0]?.heldUnits).toBe(10)
+})
+
+function acknowledgedCustomerShipment() {
+  let state = recordRecallShipmentSource(initialRecallPortfolioState, { id: 'customer-site-line', expectedRevision: 0, authority: 'Quality Analyst', recallId: 'RECALL-SEAL-B88', shipmentReference: 'SITE-SHIP-77', lineReference: 'SITE-LINE-1', customerId: 'CUSTOMER-1', lotReference: 'SEAL-B88', affectedUnits: 20, sourceDocument: 'SITE-MANIFEST-77', recordedBy: 'analyst' })
+  state = recordRecallNotification(state, { id: 'site-ack-notice', expectedRevision: state.revision, authority: 'Quality Director', recallId: 'RECALL-SEAL-B88', customerId: 'CUSTOMER-1', outcome: 'acknowledged', failureReason: null, actor: 'Customer recovery desk', attemptedOn: '2026-10-22', retryOf: null })
+  return state
+}
+const siteProposal = { id: 'site-disposition-1', expectedRevision: 0, authority: 'Quality Analyst' as const, shipmentSourceId: 'customer-site-line', repairedUnits: 6, scrappedUnits: 2, releasedUnits: 2, customerEvidence: 'CUSTOMER-SIGNED-INSPECTION-01', submittedBy: 'analyst', submittedOn: '2026-10-24' }
+const siteReview = { id: 'site-review-1', expectedRevision: 0, authority: 'Quality Director' as const, customerDispositionId: 'site-disposition-1', decision: 'accepted' as const, reviewEvidence: 'DIRECTOR-INSPECTION-REVIEW-01', reviewer: 'independent director', reviewedOn: '2026-10-25' }
+
+it('conserves shipment units across physical returns and independently reviewed customer-site disposition', () => {
+  const state = acknowledgedCustomerShipment()
+  const returned = recordRecallShipmentReturn(state, { id: 'site-return', expectedRevision: state.revision, authority: 'Quality Director', shipmentSourceId: 'customer-site-line', returnedUnits: 10, custodyReference: 'SITE-CUSTODY-77', receivedBy: 'Recovery desk', receivedOn: '2026-10-23' })
+  const proposed = proposeCustomerRecallDisposition(returned, { ...siteProposal, expectedRevision: returned.revision })
+  expect(getRecallShipmentRecovery(proposed, 'RECALL-SEAL-B88')[0]).toMatchObject({ returnedUnits: 10, controlledAtCustomer: 0, outstandingUnits: 10 })
+  const accepted = reviewCustomerRecallDisposition(proposed, { ...siteReview, expectedRevision: proposed.revision })
+  expect(getRecallShipmentRecovery(accepted, 'RECALL-SEAL-B88')[0]).toMatchObject({ returnedUnits: 10, controlledAtCustomer: 10, outstandingUnits: 0, customerRepairedUnits: 6, customerScrappedUnits: 2, customerReleasedUnits: 2 })
+  expect(accepted.shipmentReturns).toEqual(returned.shipmentReturns)
+  expect(accepted.recalls[0]?.recoveredUnits).toBe(10)
+  expect(accepted.customerDispositions[0]).toMatchObject({ acknowledgementId: 'site-ack-notice:ack', sourceRevision: 0, immutable: true })
+  expect(() => recordRecallShipmentReturn(accepted, { id: 'double-return', expectedRevision: accepted.revision, authority: 'Quality Director', shipmentSourceId: 'customer-site-line', returnedUnits: 1, custodyReference: 'DUPLICATE-CUSTODY', receivedBy: 'desk', receivedOn: '2026-10-26' })).toThrow('remaining units')
+  expect(() => proposeCustomerRecallDisposition(accepted, { ...siteProposal, id: 'over-site', expectedRevision: accepted.revision, repairedUnits: 1, scrappedUnits: 0, releasedUnits: 0 })).toThrow('whole unresolved units')
+})
+
+it('rejects unauthorized, stale, invalid or foreign customer-site decisions without partial mutation', () => {
+  const state = acknowledgedCustomerShipment()
+  const before = structuredClone(state)
+  const command = { ...siteProposal, expectedRevision: state.revision }
+  expect(() => proposeCustomerRecallDisposition(state, { ...command, authority: 'Quality Director' })).toThrow('quality analyst')
+  expect(() => proposeCustomerRecallDisposition(state, { ...command, expectedRevision: 0 })).toThrow('Refresh')
+  expect(() => proposeCustomerRecallDisposition(state, { ...command, repairedUnits: 0.5 })).toThrow('whole unresolved units')
+  expect(() => proposeCustomerRecallDisposition(state, { ...command, submittedOn: '2026-11-31' })).toThrow('Dated customer')
+  expect(() => proposeCustomerRecallDisposition(state, { ...command, shipmentSourceId: 'missing-line' })).toThrow('verified shipment')
+  expect(() => proposeCustomerRecallDisposition({ ...state, acknowledgements: [] }, command)).toThrow('customer acknowledgement')
+  expect(state).toEqual(before)
+  const proposed = proposeCustomerRecallDisposition(state, command)
+  expect(() => reviewCustomerRecallDisposition(proposed, { ...siteReview, expectedRevision: proposed.revision, reviewer: 'analyst' })).toThrow('Independent')
+  expect(() => reviewCustomerRecallDisposition(proposed, { ...siteReview, expectedRevision: 0 })).toThrow('Refresh')
+  const changed = structuredClone(proposed); changed.shipmentSources[0]!.sourceRevision += 1
+  expect(() => reviewCustomerRecallDisposition(changed, { ...siteReview, expectedRevision: changed.revision })).toThrow('exact shipment')
+  expect(proposed.customerDispositionReviews).toEqual([])
+})
+
+it('returns a proposal overtaken by physical returns and accepts corrected evidence without deleting history', () => {
+  const state = acknowledgedCustomerShipment()
+  const proposed = proposeCustomerRecallDisposition(state, { ...siteProposal, expectedRevision: state.revision, repairedUnits: 18, scrappedUnits: 0, releasedUnits: 0 })
+  const returned = recordRecallShipmentReturn(proposed, { id: 'later-custody', expectedRevision: proposed.revision, authority: 'Quality Director', shipmentSourceId: 'customer-site-line', returnedUnits: 10, custodyReference: 'LATER-CUSTODY-77', receivedBy: 'desk', receivedOn: '2026-10-25' })
+  const before = structuredClone(returned)
+  expect(() => reviewCustomerRecallDisposition(returned, { ...siteReview, expectedRevision: returned.revision })).toThrow('return this proposal')
+  expect(returned).toEqual(before)
+  const sentBack = reviewCustomerRecallDisposition(returned, { ...siteReview, expectedRevision: returned.revision, decision: 'returned' })
+  const corrected = proposeCustomerRecallDisposition(sentBack, { ...siteProposal, id: 'site-disposition-2', expectedRevision: sentBack.revision, customerEvidence: 'CORRECTED-CUSTOMER-INSPECTION-02', submittedOn: '2026-10-26' })
+  const accepted = reviewCustomerRecallDisposition(corrected, { ...siteReview, id: 'site-review-2', expectedRevision: corrected.revision, customerDispositionId: 'site-disposition-2', reviewedOn: '2026-10-27' })
+  expect(accepted.customerDispositions[0]).toEqual(proposed.customerDispositions[0])
+  expect(accepted.customerDispositionReviews.map((item) => item.decision)).toEqual(['returned', 'accepted'])
+  expect(getRecallShipmentRecovery(accepted, 'RECALL-SEAL-B88')[0]?.outstandingUnits).toBe(0)
+  const legacy = { ...accepted, customerDispositions: undefined, customerDispositionReviews: undefined }
+  const loaded = new BrowserRecallAttemptPersistence({ getItem: () => JSON.stringify(legacy), setItem: () => undefined }).load()
+  expect(loaded?.customerDispositions).toEqual([])
+  expect(loaded?.customerDispositionReviews).toEqual([])
+  expect(loaded?.shipmentReturns).toEqual(accepted.shipmentReturns)
+})
+
+
+it('preserves shipment-scoped customer disposition evidence through stale refresh and independent review', async () => {
+  localStorage.clear()
+  const firstSource = acknowledgedCustomerShipment()
+  const state = recordRecallShipmentSource(firstSource, { id: 'second-customer-line', expectedRevision: firstSource.revision, authority: 'Quality Analyst', recallId: 'RECALL-SEAL-B88', shipmentReference: 'SITE-SHIP-88', lineReference: 'SITE-LINE-2', customerId: 'CUSTOMER-2', lotReference: 'SEAL-B88', affectedUnits: 25, sourceDocument: 'SECOND-CUSTOMER-MANIFEST-88', recordedBy: 'analyst' })
+  localStorage.setItem(BrowserRecallAttemptPersistence.key, JSON.stringify(state))
+  const user = userEvent.setup()
+  render(createElement(RecallWorkloadControl))
+  await user.selectOptions(screen.getByLabelText('Shipment line for recovery'), 'customer-site-line')
+  await user.click(screen.getByLabelText('Customer inspection evidence'))
+  await user.paste('CUSTOMER-UI-INSPECTION-77')
+  await user.selectOptions(screen.getByLabelText('Shipment line for recovery'), 'second-customer-line')
+  expect(screen.getByLabelText('Customer inspection evidence')).toHaveValue('')
+  await user.click(screen.getByLabelText('Customer inspection evidence'))
+  await user.paste('SECOND-CUSTOMER-DRAFT-88')
+  await user.selectOptions(screen.getByLabelText('Shipment line for recovery'), 'customer-site-line')
+  expect(screen.getByLabelText('Customer inspection evidence')).toHaveValue('CUSTOMER-UI-INSPECTION-77')
+  const external = recordRecallShipmentReturn(state, { id: 'external-return', expectedRevision: state.revision, authority: 'Quality Director', shipmentSourceId: 'customer-site-line', returnedUnits: 11, custodyReference: 'EXTERNAL-CUSTODY-77', receivedBy: 'desk', receivedOn: '2026-10-23' })
+  localStorage.setItem(BrowserRecallAttemptPersistence.key, JSON.stringify(external))
+  await user.click(screen.getByRole('button', { name: 'Submit customer-site disposition' }))
+  expect(screen.getByRole('status')).toHaveTextContent('Shipment recovery changed')
+  expect(screen.getByRole('status')).toHaveFocus()
+  expect(screen.getByLabelText('Customer inspection evidence')).toHaveValue('CUSTOMER-UI-INSPECTION-77')
+  await user.click(screen.getByRole('button', { name: 'Refresh customer recovery' }))
+  expect(screen.getByLabelText('Customer-site unit reconciliation')).toHaveTextContent('unresolved 9')
+  expect(screen.getByLabelText('Customer inspection evidence')).toHaveValue('CUSTOMER-UI-INSPECTION-77')
+  await user.clear(screen.getByLabelText('Customer repaired units'))
+  await user.type(screen.getByLabelText('Customer repaired units'), '9')
+  await user.click(screen.getByRole('button', { name: 'Submit customer-site disposition' }))
+  expect(screen.getByLabelText('Customer-site unit reconciliation')).toHaveTextContent('controlled at customer 0 + unresolved 9')
+  expect(screen.getByRole('button', { name: 'Accept customer-site disposition' })).toBeDisabled()
+  await user.selectOptions(screen.getByLabelText('Recall portfolio authority'), 'Quality Director')
+  await user.click(screen.getByLabelText('Customer disposition review evidence'))
+  await user.paste('INDEPENDENT-UI-REVIEW-77')
+  await user.selectOptions(screen.getByLabelText('Shipment line for recovery'), 'second-customer-line')
+  expect(screen.queryByLabelText('Customer disposition review evidence')).not.toBeInTheDocument()
+  await user.selectOptions(screen.getByLabelText('Shipment line for recovery'), 'customer-site-line')
+  expect(screen.getByLabelText('Customer disposition review evidence')).toHaveValue('INDEPENDENT-UI-REVIEW-77')
+  await user.click(screen.getByRole('button', { name: 'Accept customer-site disposition' }))
+  expect(screen.getByLabelText('Customer-site unit reconciliation')).toHaveTextContent('returned 11 + controlled at customer 9 + unresolved 0')
+  expect(new BrowserRecallAttemptPersistence(localStorage).load()?.recalls[0]?.recoveredUnits).toBe(11)
+  expect(screen.getByLabelText('Final recall decision date')).toHaveValue('2026-10-25')
+  await user.selectOptions(screen.getByLabelText('Shipment line for recovery'), 'second-customer-line')
+  expect(screen.getByLabelText('Customer inspection evidence')).toHaveValue('SECOND-CUSTOMER-DRAFT-88')
+  expect(screen.getByLabelText('Customer-site unit reconciliation')).toHaveTextContent('controlled at customer 0 + unresolved 25')
+  cleanup()
+  localStorage.clear()
 })
